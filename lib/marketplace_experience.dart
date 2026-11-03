@@ -1,4 +1,9 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
+
+import '../main.dart';
+import '../storage.dart';
 
 enum MarketplaceRole { customer, provider, admin }
 
@@ -58,11 +63,13 @@ const _white = Color(0xFFF8F8FA);
 class CustomerExperience extends StatefulWidget {
   const CustomerExperience({
     super.key,
+    required this.state,
     required this.bookings,
     required this.onCreateBooking,
     required this.onRoleChanged,
   });
 
+  final AppState state;
   final List<MarketplaceBooking> bookings;
   final CreateMarketplaceBooking onCreateBooking;
   final ValueChanged<MarketplaceRole> onRoleChanged;
@@ -77,6 +84,58 @@ class _CustomerExperienceState extends State<CustomerExperience> {
   String _sort = 'الأعلى تقييماً';
   String _city = 'كل المدن';
   String _query = '';
+
+  /// Dynamic provider list: merged from the local database (AppState.providers)
+  /// and the built-in sample providers used while no data exists.
+  List<_ServiceProvider> get _providers {
+    final dbProviders = widget.state.providers.map((p) => _ServiceProvider.fromDb(p)).toList();
+    return dbProviders.isEmpty ? _defaultProviders : dbProviders;
+  }
+
+  static const List<_ServiceProvider> _defaultProviders = [
+    _ServiceProvider(
+      name: 'قاعة ليالي صنعاء',
+      category: 'قاعات',
+      city: 'صنعاء',
+      rating: 4.8,
+      reviews: 127,
+      price: 2500000,
+      distance: 1.2,
+      icon: Icons.hotel,
+      colors: [Color(0xFF4A1414), Color(0xFF141417)],
+      completedBookings: 340,
+      description: 'قاعة فاخرة لاستضافة المناسبات والأعراس',
+      highlights: ['وجبات', 'موقف', 'تكييف'],
+    ),
+    _ServiceProvider(
+      name: 'عدسة المصور',
+      category: 'تصوير',
+      city: 'صنعاء',
+      rating: 4.9,
+      reviews: 214,
+      price: 1200000,
+      distance: 0.5,
+      icon: Icons.camera_alt,
+      colors: [Color(0xFF141417), Color(0xFF2C1810)],
+      completedBookings: 521,
+      description: 'تصوير احترافي للأعراس والمناسبات',
+      highlights: ['فيديو', 'صور', 'درامة'],
+    ),
+    _ServiceProvider(
+      name: 'الفنان سامي',
+      category: 'مطربين',
+      city: 'صنعاء',
+      rating: 4.7,
+      reviews: 89,
+      price: 3000000,
+      distance: 2.1,
+      icon: Icons.mic,
+      colors: [Color(0xFF212121), Color(0xFF141417)],
+      completedBookings: 156,
+      description: 'مطرب موهوب لأجمل المناسبات',
+      highlights: ['أداء مباشر', 'مكينة'],
+    ),
+  ];
 
   @override
   Widget build(BuildContext context) {
@@ -488,11 +547,13 @@ class _CustomerExperienceState extends State<CustomerExperience> {
 class ProviderExperience extends StatefulWidget {
   const ProviderExperience({
     super.key,
+    required this.state,
     required this.bookings,
     required this.onUpdateBooking,
     required this.onRoleChanged,
   });
 
+  final AppState state;
   final List<MarketplaceBooking> bookings;
   final UpdateMarketplaceBooking onUpdateBooking;
   final ValueChanged<MarketplaceRole> onRoleChanged;
@@ -841,7 +902,10 @@ class _ProviderProfilePageState extends State<_ProviderProfilePage> {
   Future<void> _openCalendar() async {
     final selectedDate = await Navigator.of(context).push<DateTime>(
       MaterialPageRoute<DateTime>(
-        builder: (_) => _ProviderCalendarPage(provider: widget.provider),
+        builder: (_) => _ProviderCalendarPage(
+          provider: widget.provider,
+          providerName: _provider.name,
+        ),
       ),
     );
     if (selectedDate != null) widget.onBook(selectedDate);
@@ -851,10 +915,12 @@ class _ProviderProfilePageState extends State<_ProviderProfilePage> {
 class _ProviderCalendarPage extends StatefulWidget {
   const _ProviderCalendarPage({
     required this.provider,
+    required this.providerName,
     this.ownerMode = false,
   });
 
   final _ServiceProvider provider;
+  final String providerName;
   final bool ownerMode;
 
   @override
@@ -869,13 +935,19 @@ class _ProviderCalendarPageState extends State<_ProviderCalendarPage> {
   @override
   void initState() {
     super.initState();
-    final now = DateTime.now();
-    for (final day in [4, 9, 15, 21, 27]) {
-      final date = DateTime(now.year, now.month, day);
-      if (!date.isBefore(DateTime(now.year, now.month, now.day))) {
-        _bookedDays.add(date);
+    _loadBookedDays();
+  }
+
+  /// Load actual booked days from the real booking database for this provider.
+  Future<void> _loadBookedDays() async {
+    final booked = <DateTime>{};
+    for (final booking in kGlobalBookings) {
+      if (booking.provider == widget.providerName &&
+          booking.status != 'cancelled') {
+        booked.add(DateTime(booking.date.year, booking.date.month, booking.date.day));
       }
     }
+    setState(() => _bookedDays.addAll(booked));
   }
 
   bool _isBooked(DateTime date) =>
@@ -1059,6 +1131,22 @@ class _ServiceProvider {
     required this.description,
     required this.highlights,
   });
+
+  /// Build a marketplace provider card from a database/provider account row.
+  factory _ServiceProvider.fromDb(ProviderAccount p) => _ServiceProvider(
+        name: p.name,
+        category: p.category,
+        city: 'صنعاء',
+        rating: 4.5,
+        reviews: 0,
+        price: 0,
+        distance: 0.0,
+        icon: Icons.storefront,
+        colors: const [Color(0xFF1E1E22), Color(0xFFED143B)],
+        completedBookings: 0,
+        description: 'مزود خدمة محترم عبر لوحة الإدارة',
+        highlights: const ['الخدمة', 'الموقع'],
+      );
 
   final String name;
   final String category;

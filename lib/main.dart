@@ -18,57 +18,52 @@ class BookingManagerApp extends StatelessWidget {
   const BookingManagerApp({super.key});
 
   @override
-  Widget build(BuildContext context) => MaterialApp(
-        title: 'مناسباتي',
-        debugShowCheckedModeBanner: false,
-        builder: (context, child) => Directionality(
-          textDirection: TextDirection.rtl,
-          child: child ?? const SizedBox.shrink(),
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'مناسباتي',
+      debugShowCheckedModeBanner: false,
+      builder: (context, child) => Directionality(
+        textDirection: TextDirection.rtl,
+        child: child ?? const SizedBox.shrink(),
+      ),
+      theme: ThemeData(
+        useMaterial3: true,
+        scaffoldBackgroundColor: _canvas,
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: _green,
+          primary: _green,
+          secondary: _gold,
+          background: _canvas,
+          surface: Colors.white,
         ),
-        theme: ThemeData(
-          useMaterial3: true,
-          scaffoldBackgroundColor: _canvas,
-          colorScheme: ColorScheme.fromSeed(
-            seedColor: _green,
-            primary: _green,
-            secondary: _gold,
-            background: _canvas,
-            surface: Colors.white,
+        inputDecorationTheme: InputDecorationTheme(
+          filled: true,
+          fillColor: const Color(0xFFF8F9F6),
+          contentPadding:
+              const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(13),
+            borderSide: const BorderSide(color: Color(0xFFE9EBE6)),
           ),
-          textTheme: const TextTheme(
-            headlineSmall: TextStyle(color: _ink, fontWeight: FontWeight.w700),
-            titleLarge: TextStyle(color: _ink, fontWeight: FontWeight.w700),
-            titleMedium: TextStyle(color: _ink, fontWeight: FontWeight.w600),
-            bodyMedium: TextStyle(color: _ink),
-            bodySmall: TextStyle(color: _muted),
+          enabledBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(13),
+            borderSide: const BorderSide(color: Color(0xFFE9EBE6)),
           ),
-          inputDecorationTheme: InputDecorationTheme(
-            filled: true,
-            fillColor: const Color(0xFFF8F9F6),
-            contentPadding:
-                const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
-            border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(13),
-              borderSide: const BorderSide(color: Color(0xFFE9EBE6)),
-            ),
-            enabledBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(13),
-              borderSide: const BorderSide(color: Color(0xFFE9EBE6)),
-            ),
-            focusedBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(13),
-              borderSide: const BorderSide(color: _green, width: 1.4),
-            ),
-          ),
-          cardTheme: CardTheme(
-            color: Colors.white,
-            elevation: 0,
-            shape:
-                RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+          focusedBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(13),
+            borderSide: const BorderSide(color: _green, width: 1.4),
           ),
         ),
-        home: const HomeShell(),
-      );
+        cardTheme: CardTheme(
+          color: Colors.white,
+          elevation: 0,
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+        ),
+      ),
+      home: const HomeShell(),
+    );
+  }
 }
 
 enum BookingStatus { pending, confirmed, completed, cancelled }
@@ -122,6 +117,13 @@ class Booking {
         status: BookingStatus.values
             .firstWhere((status) => status.name == json['status']),
       );
+
+  /// Clear all customer data (used by the account deletion flow).
+  void wipeCustomerData() {
+    bookings.clear();
+    entries.clear();
+    bookingPolicy = const BookingPolicy();
+  }
 }
 
 class ProviderAccount {
@@ -193,6 +195,24 @@ class AppState extends ChangeNotifier {
   final List<ChaletReservation> chaletReservations = [];
   BookingPolicy bookingPolicy = const BookingPolicy();
 
+  /// Delete ALL user data from the device (full-account deletion,
+  /// required by Apple/Google 2026 privacy policies). Irreversible.
+  Future<void> deleteAllData() async {
+    bookings.clear();
+    providers.clear();
+    entries.clear();
+    chaletListings.clear();
+    chaletReservations.clear();
+    bookingPolicy = const BookingPolicy();
+    try {
+      await writeStoredData('');
+    } catch (_) {
+      // Best-effort: clear persisted file even if local storage fails.
+    }
+    notifyListeners();
+  }
+
+
   Future<void> load() async {
     final stored = await readStoredData();
     if (stored == null || stored.isEmpty) return;
@@ -237,6 +257,20 @@ class AppState extends ChangeNotifier {
           chaletReservations.map((item) => item.toJson()).toList(),
       'bookingPolicy': bookingPolicy.toJson(),
     }));
+    notifyListeners();
+  }
+
+  /// Wipe all data for full-account deletion (Apple/Google 2026 privacy).
+  Future<void> wipeAllData() async {
+    bookings.clear();
+    providers.clear();
+    entries.clear();
+    chaletListings.clear();
+    chaletReservations.clear();
+    bookingPolicy = const BookingPolicy();
+    try {
+      await writeStoredData('');
+    } catch (_) {}
     notifyListeners();
   }
 
@@ -647,18 +681,21 @@ class _HomeShellState extends State<HomeShell> {
 
     if (_role == MarketplaceRole.customer) {
       return CustomerExperience(
+        state: _state,
         bookings: marketplaceBookings,
-        onCreateBooking: (draft) => _state.addBooking(
-          Booking(
-            id: DateTime.now().microsecondsSinceEpoch.toString(),
-            customer: draft.customerName,
-            phone: draft.phone,
-            service: draft.serviceName,
-            provider: draft.providerName,
-            date: draft.date,
-            amount: draft.amount,
-          ),
-        ),
+        onCreateBooking: (draft) {
+          _state.addBooking(
+            Booking(
+              id: DateTime.now().microsecondsSinceEpoch.toString(),
+              customer: draft.customerName,
+              phone: draft.phone,
+              service: draft.serviceName,
+              provider: draft.providerName,
+              date: draft.date,
+              amount: draft.amount,
+            ),
+          );
+        },
         onRoleChanged: (role) => setState(() {
           _role = role;
           _tab = 0;
@@ -668,6 +705,7 @@ class _HomeShellState extends State<HomeShell> {
 
     if (_role == MarketplaceRole.provider) {
       return ProviderExperience(
+        state: _state,
         bookings: marketplaceBookings,
         onUpdateBooking: (id, confirmed) {
           final index = _state.bookings.indexWhere((booking) => booking.id == id);
@@ -2379,3 +2417,11 @@ String _money(double amount) {
       ? buffer.toString()
       : '${buffer.toString()}.${parts[1]}';
 }
+
+// ---------------------------------------------------------------------------
+// Identity & Theming (Luxury Dark Theme - Unified)
+const String kFontFamily = 'Cairo';
+const Color kMarketplaceBg = Color(0xFF141417);
+const Color kMarketplaceSurface = Color(0xFF1E1E22);
+const Color kMarketplaceSurfaceRaised = Color(0xFF25252A);
+const Color kAccent = Color(0xFFED143B);
