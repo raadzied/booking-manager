@@ -4,13 +4,17 @@
 /// the app operates fully offline using local storage (storage.dart).
 /// Once configured, it seamlessly switches to Supabase cloud sync.
 class SupabaseConfig {
-  static const String supabaseUrl = 'YOUR_SUPABASE_URL';
-  static const String supabaseAnonKey = 'YOUR_SUPABASE_ANON_KEY';
+  static const String supabaseUrl =
+      String.fromEnvironment('SUPABASE_URL', defaultValue: '');
+  static const String supabaseAnonKey =
+      String.fromEnvironment('SUPABASE_ANON_KEY', defaultValue: '');
 
   /// Returns true if valid Supabase credentials have been provided.
-  static bool get isConfigured =>
-      supabaseUrl != 'YOUR_SUPABASE_URL' &&
-      supabaseAnonKey != 'YOUR_SUPABASE_ANON_KEY' &&
-      supabaseUrl.isNotEmpty &&
-      supabaseAnonKey.isNotEmpty;
+  static bool get isSupabaseConfigured {
+    final uri = Uri.tryParse(supabaseUrl);
+    final secureUrl = uri?.scheme == 'https' && uri!.hasAuthority;
+    final localDevelopmentUrl = uri?.scheme == 'http' &&
+        (uri!.host == 'localhost' || uri.host == '127.0.0.1');
+    return (secureUrl || localDevelopmentUrl) && supabaseAnonKey.isNotEmpty;
+  }
 }

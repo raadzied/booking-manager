@@ -1,18 +1,33 @@
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
-import 'chalet_booking.dart';
+import 'admin_dashboard.dart';
+import 'auth_flow.dart';
+import 'event_services.dart';
 import 'marketplace_experience.dart';
 import 'storage.dart';
+import 'supabase_config.dart';
 
-const _ink = Color(0xFF20231F);
 const _muted = Color(0xFF7C817B);
 const _canvas = Color(0xFFF7F7F3);
 const _green = Color.fromARGB(255, 163, 18, 18);
 const _gold = Color.fromARGB(255, 204, 40, 40);
 
-void main() => runApp(const BookingManagerApp());
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  if (SupabaseConfig.isSupabaseConfigured) {
+    await Supabase.initialize(
+      url: SupabaseConfig.supabaseUrl,
+      anonKey: SupabaseConfig.supabaseAnonKey,
+      authFlowType: AuthFlowType.pkce,
+      authCallbackUrlHostname: 'login-callback',
+    );
+  }
+  runApp(const BookingManagerApp());
+}
 
 class BookingManagerApp extends StatelessWidget {
   const BookingManagerApp({super.key});
@@ -28,6 +43,7 @@ class BookingManagerApp extends StatelessWidget {
       ),
       theme: ThemeData(
         useMaterial3: true,
+        textTheme: GoogleFonts.cairoTextTheme(),
         scaffoldBackgroundColor: _canvas,
         colorScheme: ColorScheme.fromSeed(
           seedColor: _green,
@@ -78,7 +94,11 @@ class Booking {
     required this.date,
     required this.amount,
     this.paid = 0,
+    this.depositAmount = 0,
     this.status = BookingStatus.pending,
+    this.shiftType = 'evening',
+    this.packageName = '',
+    this.guestCount,
   });
 
   final String id;
@@ -89,7 +109,11 @@ class Booking {
   final DateTime date;
   final double amount;
   double paid;
+  final double depositAmount;
   BookingStatus status;
+  final String shiftType;
+  final String packageName;
+  final int? guestCount;
 
   double get remaining => (amount - paid).clamp(0, double.infinity).toDouble();
 
@@ -102,7 +126,11 @@ class Booking {
         'date': date.toIso8601String(),
         'amount': amount,
         'paid': paid,
+        'depositAmount': depositAmount,
         'status': status.name,
+        'shiftType': shiftType,
+        'packageName': packageName,
+        'guestCount': guestCount,
       };
 
   factory Booking.fromJson(Map<String, dynamic> json) => Booking(
@@ -114,16 +142,13 @@ class Booking {
         date: DateTime.parse(json['date'] as String),
         amount: (json['amount'] as num).toDouble(),
         paid: (json['paid'] as num).toDouble(),
+        depositAmount: (json['depositAmount'] as num?)?.toDouble() ?? 0,
         status: BookingStatus.values
             .firstWhere((status) => status.name == json['status']),
+        shiftType: (json['shiftType'] as String?) ?? 'evening',
+        packageName: (json['packageName'] as String?) ?? '',
+        guestCount: json['guestCount'] as int?,
       );
-
-  /// Clear all customer data (used by the account deletion flow).
-  void wipeCustomerData() {
-    bookings.clear();
-    entries.clear();
-    bookingPolicy = const BookingPolicy();
-  }
 }
 
 class ProviderAccount {
@@ -191,27 +216,14 @@ class AppState extends ChangeNotifier {
   final List<Booking> bookings = [];
   final List<ProviderAccount> providers = [];
   final List<LedgerEntry> entries = [];
-  final List<ChaletListing> chaletListings = sampleChaletListings();
-  final List<ChaletReservation> chaletReservations = [];
-  BookingPolicy bookingPolicy = const BookingPolicy();
 
-  /// Delete ALL user data from the device (full-account deletion,
-  /// required by Apple/Google 2026 privacy policies). Irreversible.
   Future<void> deleteAllData() async {
+    await writeStoredData('');
     bookings.clear();
     providers.clear();
     entries.clear();
-    chaletListings.clear();
-    chaletReservations.clear();
-    bookingPolicy = const BookingPolicy();
-    try {
-      await writeStoredData('');
-    } catch (_) {
-      // Best-effort: clear persisted file even if local storage fails.
-    }
     notifyListeners();
   }
-
 
   Future<void> load() async {
     final stored = await readStoredData();
@@ -229,21 +241,11 @@ class AppState extends ChangeNotifier {
       ..clear()
       ..addAll(((data['entries'] as List<dynamic>?) ?? const <dynamic>[])
           .map((item) => LedgerEntry.fromJson(item as Map<String, dynamic>)));
-    if (data['chaletListings'] is List<dynamic>) {
-      chaletListings
-        ..clear()
-        ..addAll((data['chaletListings'] as List<dynamic>).map(
-            (item) => ChaletListing.fromJson(item as Map<String, dynamic>)));
-    }
-    if (data['chaletReservations'] is List<dynamic>) {
-      chaletReservations
-        ..clear()
-        ..addAll((data['chaletReservations'] as List<dynamic>).map((item) =>
-            ChaletReservation.fromJson(item as Map<String, dynamic>)));
-    }
-    if (data['bookingPolicy'] is Map<String, dynamic>) {
-      bookingPolicy =
-          BookingPolicy.fromJson(data['bookingPolicy'] as Map<String, dynamic>);
+
+    if (data.containsKey('chaletListings') ||
+        data.containsKey('chaletReservations') ||
+        data.containsKey('bookingPolicy')) {
+      await _save();
     }
   }
 
@@ -252,261 +254,25 @@ class AppState extends ChangeNotifier {
       'bookings': bookings.map((item) => item.toJson()).toList(),
       'providers': providers.map((item) => item.toJson()).toList(),
       'entries': entries.map((item) => item.toJson()).toList(),
-      'chaletListings': chaletListings.map((item) => item.toJson()).toList(),
-      'chaletReservations':
-          chaletReservations.map((item) => item.toJson()).toList(),
-      'bookingPolicy': bookingPolicy.toJson(),
     }));
     notifyListeners();
   }
 
-  /// Wipe all data for full-account deletion (Apple/Google 2026 privacy).
-  Future<void> wipeAllData() async {
-    bookings.clear();
-    providers.clear();
-    entries.clear();
-    chaletListings.clear();
-    chaletReservations.clear();
-    bookingPolicy = const BookingPolicy();
-    try {
-      await writeStoredData('');
-    } catch (_) {}
-    notifyListeners();
-  }
-
-  Future<void> addChaletReservation(ChaletReservation reservation) async {
-    if (chaletReservations.any((item) => item.id == reservation.id)) {
-      throw StateError('رقم طلب الحجز مستخدم مسبقاً');
-    }
-    final listingIndex =
-        chaletListings.indexWhere((item) => item.id == reservation.chaletId);
-    final listing = listingIndex < 0 ? null : chaletListings[listingIndex];
-    if (listing == null) throw StateError('مكان الإقامة غير موجود');
-    final today = DateTime.now();
-    final checkIn = DateTime(
-      reservation.checkIn.year,
-      reservation.checkIn.month,
-      reservation.checkIn.day,
-    );
-    if (reservation.guests < 1 ||
-        reservation.guests > listing.maxGuests ||
-        reservation.customerName.trim().isEmpty ||
-        reservation.phone.trim().isEmpty ||
-        checkIn.isBefore(DateTime(today.year, today.month, today.day)) ||
-        reservation.status != ChaletReservationStatus.awaitingProvider) {
-      throw StateError('بيانات طلب الحجز غير مكتملة');
-    }
-    final quote = listing.quote(
-      checkIn: reservation.checkIn,
-      checkOut: reservation.checkOut,
-      reservations: chaletReservations,
-      policy: bookingPolicy,
-    );
-    if (quote.totalAmount != reservation.totalAmount ||
-        quote.depositAmount != reservation.depositAmount ||
-        quote.commissionAmount != reservation.commissionAmount ||
-        reservation.depositPercent != bookingPolicy.depositPercent ||
-        reservation.commissionPercent != bookingPolicy.commissionPercent) {
-      throw StateError('تغير السعر أو السياسة؛ أعد حساب عرض السعر');
-    }
-    chaletReservations.add(reservation);
-    try {
-      await _save();
-    } catch (_) {
-      chaletReservations.remove(reservation);
-      rethrow;
-    }
-  }
-
-  Future<void> submitChaletReceipt(
-    String reservationId,
-    PaymentReceipt receipt,
-  ) async {
-    final index = _chaletReservationIndex(reservationId);
-    final reservation = chaletReservations[index];
-    final normalizedReference = receipt.reference.trim().toLowerCase();
-    final duplicateReference = chaletReservations.any((item) => item.receipts
-        .any((existing) =>
-            existing.wallet == receipt.wallet &&
-            existing.reference.trim().toLowerCase() == normalizedReference));
-    if (reservation.status == ChaletReservationStatus.cancelled ||
-        receipt.status != PaymentReceiptStatus.submitted ||
-        receipt.amount <= 0 ||
-        normalizedReference.isEmpty ||
-        receipt.amount > reservation.availableForReceipt ||
-        receipt.amount < reservation.remainingDeposit ||
-        duplicateReference ||
-        !_hasValidReceiptProof(receipt)) {
-      throw StateError('بيانات التحويل غير صالحة أو مسجلة مسبقاً');
-    }
-    await _replaceChaletReservation(
-      index,
-      reservation.copyWith(receipts: [...reservation.receipts, receipt]),
-    );
-  }
-
-  Future<void> reviewChaletReceipt(
-    String reservationId,
-    String receiptId,
-    bool approved,
-  ) async {
-    final index = _chaletReservationIndex(reservationId);
-    final reservation = chaletReservations[index];
-    final receiptIndex =
-        reservation.receipts.indexWhere((item) => item.id == receiptId);
-    if (receiptIndex < 0 ||
-        reservation.receipts[receiptIndex].status !=
-            PaymentReceiptStatus.submitted) {
-      throw StateError('الإيصال غير موجود أو تمت مراجعته مسبقاً');
-    }
-    final updatedReceipt = reservation.receipts[receiptIndex].copyWith(
-      status: approved
-          ? PaymentReceiptStatus.verified
-          : PaymentReceiptStatus.rejected,
-    );
-    final receipts = [...reservation.receipts];
-    receipts[receiptIndex] = updatedReceipt;
-    final updated = reservation.copyWith(receipts: receipts);
-    if (updated.verifiedAmount > updated.totalAmount) {
-      throw StateError('المبلغ المطابق يتجاوز قيمة الحجز');
-    }
-    await _replaceChaletReservation(index, updated);
-  }
-
-  Future<void> confirmChaletProvider(String reservationId) async {
-    final index = _chaletReservationIndex(reservationId);
-    final reservation = chaletReservations[index];
-    if (reservation.status != ChaletReservationStatus.awaitingProvider) {
-      throw StateError('الطلب ليس بانتظار رد المزود');
-    }
-    await _replaceChaletReservation(
-      index,
-      reservation.copyWith(status: ChaletReservationStatus.confirmed),
-    );
-  }
-
-  Future<void> completeChaletStay(String reservationId) async {
-    final index = _chaletReservationIndex(reservationId);
-    final reservation = chaletReservations[index];
-    if (reservation.status != ChaletReservationStatus.confirmed ||
-        DateTime.now().isBefore(DateTime(
-          reservation.checkOut.year,
-          reservation.checkOut.month,
-          reservation.checkOut.day,
-        ))) {
-      throw StateError('لا يمكن تسجيل التنفيذ قبل موعد المغادرة');
-    }
-    await _replaceChaletReservation(
-      index,
-      reservation.copyWith(
-        status: ChaletReservationStatus.completed,
-        completedAt: DateTime.now(),
-      ),
-    );
-  }
-
-  Future<void> raiseChaletDispute(String reservationId, String reason) async {
-    final index = _chaletReservationIndex(reservationId);
-    final reservation = chaletReservations[index];
-    final completedAt = reservation.completedAt;
-    if (reason.trim().isEmpty ||
-        reservation.status != ChaletReservationStatus.completed ||
-        reservation.disputeReason != null ||
-        reservation.settlementStatus == SettlementStatus.settled ||
-        completedAt == null ||
-        !DateTime.now().isBefore(
-            completedAt.add(Duration(hours: reservation.disputeWindowHours)))) {
-      throw StateError('لا يمكن فتح نزاع لهذا الحجز الآن');
-    }
-    await _replaceChaletReservation(
-      index,
-      reservation.copyWith(
-        disputeReason: reason.trim(),
-        disputedAt: DateTime.now(),
-      ),
-    );
-  }
-
-  Future<void> openChaletSettlement(String reservationId) async {
-    final index = _chaletReservationIndex(reservationId);
-    final reservation = chaletReservations[index];
-    if (!reservation.canOpenSettlement(DateTime.now())) {
-      throw StateError('الحجز غير مستوفٍ لشروط التسوية');
-    }
-    await _replaceChaletReservation(
-      index,
-      reservation.copyWith(settlementStatus: SettlementStatus.ready),
-    );
-  }
-
-  Future<void> settleChaletReservation(String reservationId) async {
-    final index = _chaletReservationIndex(reservationId);
-    final reservation = chaletReservations[index];
-    if (reservation.settlementStatus != SettlementStatus.ready ||
-        reservation.status != ChaletReservationStatus.completed ||
-        reservation.disputeReason != null ||
-        reservation.completedAt == null ||
-        DateTime.now().isBefore(reservation.completedAt!
-            .add(Duration(hours: reservation.disputeWindowHours))) ||
-        !reservation.isFullyPaid) {
-      throw StateError('لا يمكن تسوية هذا الحجز');
-    }
-    await _replaceChaletReservation(
-      index,
-      reservation.copyWith(
-        settlementStatus: SettlementStatus.settled,
-        settledAt: DateTime.now(),
-      ),
-    );
-  }
-
-  Future<void> updateBookingPolicy(BookingPolicy policy) async {
-    final previous = bookingPolicy;
-    bookingPolicy = policy;
-    try {
-      await _save();
-    } catch (_) {
-      bookingPolicy = previous;
-      rethrow;
-    }
-  }
-
-  bool _hasValidReceiptProof(PaymentReceipt receipt) {
-    final data = receipt.proofBase64;
-    if (data == null || data.isEmpty || receipt.proofFileName == null) {
-      return false;
-    }
-    if (data.length > ((512 * 1024 + 2) ~/ 3) * 4) return false;
-    try {
-      return base64Decode(data).lengthInBytes <= 512 * 1024;
-    } on FormatException {
-      return false;
-    }
-  }
-
-  int _chaletReservationIndex(String id) => _findChaletReservationIndex(id);
-
-  int _findChaletReservationIndex(String id) {
-    final index = chaletReservations.indexWhere((item) => item.id == id);
-    if (index < 0) throw StateError('طلب الحجز غير موجود');
-    return index;
-  }
-
-  Future<void> _replaceChaletReservation(
-    int index,
-    ChaletReservation updated,
-  ) async {
-    final previous = chaletReservations[index];
-    chaletReservations[index] = updated;
-    try {
-      await _save();
-    } catch (_) {
-      chaletReservations[index] = previous;
-      rethrow;
-    }
-  }
-
   Future<void> addBooking(Booking booking) async {
+    if (booking.id.isEmpty || bookings.any((item) => item.id == booking.id)) {
+      throw StateError('رقم الحجز غير صالح أو مستخدم مسبقاً.');
+    }
+    if (booking.customer.trim().isEmpty ||
+        booking.phone.trim().isEmpty ||
+        booking.provider.trim().isEmpty ||
+        booking.service.trim().isEmpty ||
+        !booking.amount.isFinite ||
+        booking.amount <= 0 ||
+        !booking.paid.isFinite ||
+        booking.paid < 0 ||
+        booking.paid > booking.amount) {
+      throw StateError('بيانات الحجز غير مكتملة.');
+    }
     bookings.add(booking);
     try {
       await _save();
@@ -516,22 +282,24 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  Future<void> updateBooking(Booking booking) => _save();
-
   Future<void> changeBookingStatus(
-      Booking booking, BookingStatus status) async {
+    Booking booking,
+    BookingStatus status,
+  ) async {
     final oldStatus = booking.status;
     booking.status = status;
     try {
       await _save();
     } catch (_) {
       booking.status = oldStatus;
-      notifyListeners();
       rethrow;
     }
   }
 
   Future<void> recordPayment(Booking booking, double amount) async {
+    if (!amount.isFinite || amount <= 0 || amount > booking.remaining) {
+      throw StateError('مبلغ الدفعة غير صالح أو يتجاوز المبلغ المتبقي.');
+    }
     final oldPaid = booking.paid;
     final oldStatus = booking.status;
     booking.paid += amount;
@@ -541,12 +309,14 @@ class AppState extends ChangeNotifier {
     } catch (_) {
       booking.paid = oldPaid;
       booking.status = oldStatus;
-      notifyListeners();
       rethrow;
     }
   }
 
   Future<void> addProvider(ProviderAccount provider) async {
+    if (provider.name.trim().isEmpty || provider.phone.trim().isEmpty) {
+      throw StateError('اسم المزود ورقم الهاتف مطلوبان.');
+    }
     providers.add(provider);
     try {
       await _save();
@@ -558,7 +328,8 @@ class AppState extends ChangeNotifier {
 
   Future<void> removeProvider(ProviderAccount provider) async {
     final index = providers.indexOf(provider);
-    providers.remove(provider);
+    if (index < 0) return;
+    providers.removeAt(index);
     try {
       await _save();
     } catch (_) {
@@ -568,6 +339,11 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> addEntry(LedgerEntry entry) async {
+    if (entry.title.trim().isEmpty ||
+        !entry.amount.isFinite ||
+        entry.amount <= 0) {
+      throw StateError('بيانات الحركة المالية غير صالحة.');
+    }
     entries.add(entry);
     try {
       await _save();
@@ -577,46 +353,26 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  double get bookingValue =>
-      bookings
-          .where((item) => item.status != BookingStatus.cancelled)
-          .fold(0.0, (total, item) => total + item.amount) +
-      chaletReservations
-          .where((item) => item.status != ChaletReservationStatus.cancelled)
-          .fold(0, (total, item) => total + item.totalAmount);
+  double get bookingValue => bookings
+      .where((item) => item.status != BookingStatus.cancelled)
+      .fold(0.0, (total, item) => total + item.amount);
 
   double get bookingPayments =>
       bookings.fold(0.0, (total, item) => total + item.paid);
 
   double get otherIncome => entries
       .where((entry) => entry.kind == 'income')
-      .fold(0, (total, entry) => total + entry.amount);
+      .fold(0.0, (total, entry) => total + entry.amount);
 
   double get expenses => entries
       .where((entry) => entry.kind == 'expense')
-      .fold(0, (total, entry) => total + entry.amount);
+      .fold(0.0, (total, entry) => total + entry.amount);
 
-  double get settledChaletCommission => chaletReservations
-      .where((item) =>
-          item.settlementStatus == SettlementStatus.settled &&
-          item.settledAt != null)
-      .fold(0, (total, item) => total + item.commissionAmount)
-      .toDouble();
+  double get totalIncome => bookingPayments + otherIncome;
 
-  int get heldChaletFunds => chaletReservations
-      .where((item) => item.settlementStatus != SettlementStatus.settled)
-      .fold(0, (total, item) => total + item.verifiedAmount);
-
-  double get totalIncome =>
-      bookingPayments + otherIncome + settledChaletCommission;
-
-  double get outstanding =>
-      bookings
-          .where((item) => item.status != BookingStatus.cancelled)
-          .fold(0.0, (total, item) => total + item.remaining) +
-      chaletReservations
-          .where((item) => item.status != ChaletReservationStatus.cancelled)
-          .fold(0, (total, item) => total + item.outstandingAmount);
+  double get outstanding => bookings
+      .where((item) => item.status != BookingStatus.cancelled)
+      .fold(0.0, (total, item) => total + item.remaining);
 }
 
 class HomeShell extends StatefulWidget {
@@ -667,15 +423,53 @@ class _HomeShellState extends State<HomeShell> {
   }
 
   Widget _buildShell(BuildContext context) {
+    if (_role == MarketplaceRole.auth) {
+      return AuthFlow(
+        onComplete: (userId, role, verificationStatus) {
+          if (!mounted) return;
+          if (role == 'provider') {
+            if (verificationStatus == 'approved') {
+              setState(() => _role = MarketplaceRole.provider);
+              return;
+            }
+            setState(() => _role = MarketplaceRole.customer);
+            ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+              content: Text(verificationStatus == 'pending'
+                  ? 'تم استلام طلب مقدم الخدمة، وهو بانتظار التحقق.'
+                  : 'حالة حساب مقدم الخدمة: ${verificationStatus ?? 'غير معروفة'}'),
+            ));
+            return;
+          }
+          if (role == 'admin') {
+            setState(() => _role = MarketplaceRole.admin);
+            return;
+          }
+          setState(() => _role = MarketplaceRole.customer);
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('تم تسجيل الدخول بنجاح.'),
+          ));
+        },
+        onGuest: () => setState(() => _role = MarketplaceRole.customer),
+      );
+    }
+
     final marketplaceBookings = _state.bookings
         .map((booking) => MarketplaceBooking(
               id: booking.id,
               customerName: booking.customer,
+              customerPhone: booking.phone,
               providerName: booking.provider,
               serviceName: booking.service,
               date: booking.date,
               amount: booking.amount,
+              depositAmount: booking.depositAmount,
               status: booking.status.name,
+              shiftType: EventShift.values.firstWhere(
+                (shift) => shift.name == booking.shiftType,
+                orElse: () => EventShift.evening,
+              ),
+              packageName: booking.packageName,
+              guestCount: booking.guestCount,
             ))
         .toList();
 
@@ -683,8 +477,24 @@ class _HomeShellState extends State<HomeShell> {
       return CustomerExperience(
         state: _state,
         bookings: marketplaceBookings,
-        onCreateBooking: (draft) {
-          _state.addBooking(
+        onCreateBooking: (draft) async {
+          if (SupabaseConfig.isSupabaseConfigured) {
+            final user = Supabase.instance.client.auth.currentUser;
+            if (user == null) {
+              throw StateError('سجّل الدخول قبل إرسال طلب الحجز.');
+            }
+            await Supabase.instance.client.rpc('create_event_booking', params: {
+              'target_provider_id': draft.providerId,
+              'event_day': '${draft.date.year.toString().padLeft(4, '0')}-'
+                  '${draft.date.month.toString().padLeft(2, '0')}-'
+                  '${draft.date.day.toString().padLeft(2, '0')}',
+              'selected_shift': draft.shiftType.name,
+              'selected_package': draft.packageName,
+              'number_of_guests': draft.guestCount,
+            });
+            return;
+          }
+          await _state.addBooking(
             Booking(
               id: DateTime.now().microsecondsSinceEpoch.toString(),
               customer: draft.customerName,
@@ -693,13 +503,14 @@ class _HomeShellState extends State<HomeShell> {
               provider: draft.providerName,
               date: draft.date,
               amount: draft.amount,
+              depositAmount: draft.depositAmount,
+              shiftType: draft.shiftType.name,
+              packageName: draft.packageName,
+              guestCount: draft.guestCount,
             ),
           );
         },
-        onRoleChanged: (role) => setState(() {
-          _role = role;
-          _tab = 0;
-        }),
+        onRoleChanged: _selectRole,
       );
     }
 
@@ -707,106 +518,176 @@ class _HomeShellState extends State<HomeShell> {
       return ProviderExperience(
         state: _state,
         bookings: marketplaceBookings,
-        onUpdateBooking: (id, confirmed) {
-          final index = _state.bookings.indexWhere((booking) => booking.id == id);
+        onUpdateBooking: (id, confirmed) async {
+          if (SupabaseConfig.isSupabaseConfigured) {
+            await Supabase.instance.client.from('bookings').update(
+                {'status': confirmed ? 'confirmed' : 'cancelled'}).eq('id', id);
+            return;
+          }
+          final index =
+              _state.bookings.indexWhere((booking) => booking.id == id);
           if (index < 0) throw StateError('طلب الحجز غير موجود');
           return _state.changeBookingStatus(
             _state.bookings[index],
             confirmed ? BookingStatus.confirmed : BookingStatus.cancelled,
           );
         },
-        onRoleChanged: (role) => setState(() {
-          _role = role;
+        onRoleChanged: _selectRole,
+      );
+    }
+
+    if (_role == MarketplaceRole.admin) {
+      return AdminDashboard(
+        onExit: () => setState(() {
+          _role = MarketplaceRole.customer;
           _tab = 0;
         }),
       );
     }
 
     return LayoutBuilder(
-        builder: (context, constraints) {
-          final desktop = constraints.maxWidth >= 900;
-          final pages = [
-            DashboardPage(
-                state: _state,
-                onNavigate: (index) => setState(() => _tab = index)),
-            BookingsPage(state: _state),
-            AccountsPage(state: _state),
-            ProvidersPage(state: _state),
-            ChaletBookingPage(
-              listings: _state.chaletListings,
-              reservations: _state.chaletReservations,
-              policy: _state.bookingPolicy,
-              onCreateReservation: _state.addChaletReservation,
-              onSubmitReceipt: _state.submitChaletReceipt,
-              onReviewReceipt: _state.reviewChaletReceipt,
-              onConfirmProvider: _state.confirmChaletProvider,
-              onCompleteStay: _state.completeChaletStay,
-              onRaiseDispute: _state.raiseChaletDispute,
-              onOpenSettlement: _state.openChaletSettlement,
-              onSettle: _state.settleChaletReservation,
-              onUpdatePolicy: _state.updateBookingPolicy,
-            ),
-          ];
-          return Scaffold(
-            body: SafeArea(
-              child: Row(
-                children: [
-                  if (desktop)
-                    _Sidebar(
-                        selected: _tab,
-                        onSelect: (index) {
-                          setState(() => _tab = index);
-                        }),
-                  Expanded(
-                    child: Column(
-                      children: [
-                        _TopBar(
-                          onAddBooking: () => _openBookingForm(context, _state),
-                          onRoleChanged: (role) => setState(() {
-                            _role = role;
-                            _tab = 0;
-                          }),
-                        ),
-                        Expanded(
-                            child: IndexedStack(index: _tab, children: pages)),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            bottomNavigationBar: desktop
-                ? null
-                : NavigationBar(
-                    selectedIndex: _tab,
-                    onDestinationSelected: (index) =>
-                        setState(() => _tab = index),
-                    destinations: const [
-                      NavigationDestination(
-                          icon: Icon(Icons.space_dashboard_outlined),
-                          selectedIcon: Icon(Icons.space_dashboard),
-                          label: 'الرئيسية'),
-                      NavigationDestination(
-                          icon: Icon(Icons.event_note_outlined),
-                          selectedIcon: Icon(Icons.event_note),
-                          label: 'الحجوزات'),
-                      NavigationDestination(
-                          icon: Icon(Icons.account_balance_wallet_outlined),
-                          selectedIcon: Icon(Icons.account_balance_wallet),
-                          label: 'الحسابات'),
-                      NavigationDestination(
-                          icon: Icon(Icons.storefront_outlined),
-                          selectedIcon: Icon(Icons.storefront),
-                          label: 'المزودون'),
-                      NavigationDestination(
-                          icon: Icon(Icons.cabin_outlined),
-                          selectedIcon: Icon(Icons.cabin),
-                          label: 'الشاليهات'),
+      builder: (context, constraints) {
+        final desktop = constraints.maxWidth >= 900;
+        final pages = [
+          DashboardPage(
+              state: _state,
+              onNavigate: (index) => setState(() => _tab = index)),
+          BookingsPage(state: _state),
+          AccountsPage(state: _state),
+          ProvidersPage(state: _state),
+        ];
+        return Scaffold(
+          body: SafeArea(
+            child: Row(
+              children: [
+                if (desktop)
+                  _Sidebar(
+                      selected: _tab,
+                      onSelect: (index) {
+                        setState(() => _tab = index);
+                      }),
+                Expanded(
+                  child: Column(
+                    children: [
+                      _TopBar(
+                        onAddBooking: () => _openBookingForm(context, _state),
+                        onRoleChanged: _selectRole,
+                      ),
+                      Expanded(
+                          child: IndexedStack(index: _tab, children: pages)),
                     ],
                   ),
-          );
-        },
-      );
+                ),
+              ],
+            ),
+          ),
+          bottomNavigationBar: desktop
+              ? null
+              : NavigationBar(
+                  selectedIndex: _tab,
+                  onDestinationSelected: (index) =>
+                      setState(() => _tab = index),
+                  destinations: const [
+                    NavigationDestination(
+                        icon: Icon(Icons.space_dashboard_outlined),
+                        selectedIcon: Icon(Icons.space_dashboard),
+                        label: 'الرئيسية'),
+                    NavigationDestination(
+                        icon: Icon(Icons.event_note_outlined),
+                        selectedIcon: Icon(Icons.event_note),
+                        label: 'الحجوزات'),
+                    NavigationDestination(
+                        icon: Icon(Icons.account_balance_wallet_outlined),
+                        selectedIcon: Icon(Icons.account_balance_wallet),
+                        label: 'الحسابات'),
+                    NavigationDestination(
+                        icon: Icon(Icons.storefront_outlined),
+                        selectedIcon: Icon(Icons.storefront),
+                        label: 'مزودو الخدمة'),
+                  ],
+                ),
+        );
+      },
+    );
+  }
+
+  void _selectRole(MarketplaceRole role) {
+    if (role == MarketplaceRole.admin) {
+      _checkAdminAndEnter();
+      return;
+    }
+    if (role == MarketplaceRole.provider &&
+        SupabaseConfig.isSupabaseConfigured) {
+      _checkProviderAndEnter();
+      return;
+    }
+    setState(() {
+      _role = role;
+      _tab = 0;
+    });
+  }
+
+  Future<void> _checkProviderAndEnter() async {
+    final user = Supabase.instance.client.auth.currentUser;
+    if (user == null) {
+      setState(() => _role = MarketplaceRole.auth);
+      return;
+    }
+    try {
+      final status = await Supabase.instance.client
+          .rpc('get_current_provider_status') as String?;
+      if (!mounted) return;
+      if (status != 'approved') {
+        _showAccessMessage(
+          status == 'pending'
+              ? 'حساب مقدم الخدمة بانتظار التحقق.'
+              : 'هذا الحساب غير مخول لواجهة مقدم الخدمة.',
+        );
+        return;
+      }
+      setState(() {
+        _role = MarketplaceRole.provider;
+        _tab = 0;
+      });
+    } catch (error) {
+      _showAccessMessage('تعذر التحقق من حالة مقدم الخدمة: $error');
+    }
+  }
+
+  Future<void> _checkAdminAndEnter() async {
+    if (!SupabaseConfig.isSupabaseConfigured) {
+      _showAccessMessage('لوحة الإدارة تتطلب حساب Supabase بصلاحية admin.');
+      return;
+    }
+    final user = Supabase.instance.client.auth.currentUser;
+    if (user == null) {
+      setState(() => _role = MarketplaceRole.auth);
+      return;
+    }
+    try {
+      final profile = await Supabase.instance.client
+          .from('profiles')
+          .select('role')
+          .eq('id', user.id)
+          .maybeSingle();
+      if (!mounted) return;
+      if (profile?['role'] != 'admin') {
+        _showAccessMessage('هذا الحساب لا يملك صلاحية الإدارة.');
+        return;
+      }
+      setState(() {
+        _role = MarketplaceRole.admin;
+        _tab = 0;
+      });
+    } catch (error) {
+      _showAccessMessage('تعذر التحقق من صلاحيات الإدارة: $error');
+    }
+  }
+
+  void _showAccessMessage(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(message)));
   }
 }
 
@@ -854,14 +735,12 @@ class _Sidebar extends StatelessWidget {
       'الحجوزات',
       'الحسابات',
       'مزودو الخدمة',
-      'الشاليهات',
     ];
     const icons = [
       Icons.space_dashboard_outlined,
       Icons.event_note_outlined,
       Icons.account_balance_wallet_outlined,
       Icons.storefront_outlined,
-      Icons.cabin_outlined,
     ];
     return Container(
       width: 250,
@@ -1532,17 +1411,6 @@ class AccountsPage extends StatelessWidget {
             icon: Icons.event_available_outlined,
             date: booking.date,
           ),
-      for (final reservation in state.chaletReservations)
-        if (reservation.settlementStatus == SettlementStatus.settled &&
-            reservation.settledAt != null)
-          _AccountLine(
-            title: 'عمولة المنصة · ${reservation.chaletName}',
-            subtitle: 'تسوية طلب ${reservation.id}',
-            amount: reservation.commissionAmount.toDouble(),
-            income: true,
-            icon: Icons.percent,
-            date: reservation.settledAt!,
-          ),
       for (final entry in state.entries)
         _AccountLine(
           title: entry.title,
@@ -1602,10 +1470,10 @@ class AccountsPage extends StatelessWidget {
                       icon: Icons.account_balance_outlined,
                       color: const Color(0xFFB1843B)),
                   _MetricCard(
-                      title: 'أموال الشاليهات المحتجزة',
-                      value: '${_money(state.heldChaletFunds.toDouble())} ر.ي',
-                      hint: 'ليست إيراداً قبل التسوية',
-                      icon: Icons.lock_clock_outlined,
+                      title: 'المبالغ المتبقية على الحجوزات',
+                      value: '${_money(state.outstanding)} ر.ي',
+                      hint: 'تُحتسب من الطلبات غير الملغاة',
+                      icon: Icons.event_busy_outlined,
                       color: const Color(0xFF667C8A)),
                 ],
               );

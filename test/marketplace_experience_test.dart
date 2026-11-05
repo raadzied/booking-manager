@@ -1,14 +1,18 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:booking_manager/main.dart';
 import 'package:booking_manager/marketplace_experience.dart';
 
 void main() {
   testWidgets('customer can open a provider profile and inspect availability',
       (tester) async {
+    final state = AppState();
+    addTearDown(state.dispose);
     await tester.pumpWidget(
       MaterialApp(
         home: CustomerExperience(
+          state: state,
           bookings: const [],
           onCreateBooking: (_) async {},
           onRoleChanged: (_) {},
@@ -18,7 +22,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('اكتشف خدمات مناسبتك'), findsOneWidget);
-    expect(find.text('قاعات'), findsOneWidget);
+    expect(find.text('قاعات أفراح'), findsOneWidget);
     expect(find.text('الأعلى تقييماً'), findsOneWidget);
 
     await tester.drag(
@@ -47,6 +51,8 @@ void main() {
 
   testWidgets('provider can confirm a matching booking request',
       (tester) async {
+    final state = AppState();
+    addTearDown(state.dispose);
     final booking = MarketplaceBooking(
       id: 'booking-1',
       customerName: 'عميل تجريبي',
@@ -62,6 +68,7 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(
         home: ProviderExperience(
+          state: state,
           bookings: [booking],
           onUpdateBooking: (id, value) async {
             updatedId = id;

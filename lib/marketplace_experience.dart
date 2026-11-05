@@ -1,11 +1,11 @@
-import 'dart:convert';
-
 import 'package:flutter/material.dart';
 
-import '../main.dart';
-import '../storage.dart';
+import 'package:booking_manager/event_services.dart';
+import 'package:booking_manager/main.dart';
+import 'package:booking_manager/supabase_config.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
-enum MarketplaceRole { customer, provider, admin }
+enum MarketplaceRole { customer, provider, admin, auth }
 
 class MarketplaceBooking {
   const MarketplaceBooking({
@@ -16,6 +16,12 @@ class MarketplaceBooking {
     required this.date,
     required this.amount,
     required this.status,
+    this.customerPhone = '',
+    this.providerId = '',
+    this.depositAmount = 0,
+    this.shiftType = EventShift.evening,
+    this.packageName = '',
+    this.guestCount,
   });
 
   final String id;
@@ -25,24 +31,40 @@ class MarketplaceBooking {
   final DateTime date;
   final double amount;
   final String status;
+  final String customerPhone;
+  final String providerId;
+  final double depositAmount;
+  final EventShift shiftType;
+  final String packageName;
+  final int? guestCount;
 }
 
 class MarketplaceBookingDraft {
   const MarketplaceBookingDraft({
     required this.customerName,
     required this.phone,
+    required this.providerId,
     required this.providerName,
     required this.serviceName,
     required this.date,
     required this.amount,
+    required this.depositAmount,
+    required this.shiftType,
+    required this.packageName,
+    required this.guestCount,
   });
 
   final String customerName;
   final String phone;
+  final String providerId;
   final String providerName;
   final String serviceName;
   final DateTime date;
   final double amount;
+  final double depositAmount;
+  final EventShift shiftType;
+  final String packageName;
+  final int? guestCount;
 }
 
 typedef CreateMarketplaceBooking = Future<void> Function(
@@ -84,58 +106,28 @@ class _CustomerExperienceState extends State<CustomerExperience> {
   String _sort = 'الأعلى تقييماً';
   String _city = 'كل المدن';
   String _query = '';
+  List<_ServiceProvider> _remoteProviders = [];
+  bool _providersLoading = false;
+  Object? _providersError;
+  List<MarketplaceBooking> _remoteBookings = [];
+  bool _bookingsLoading = false;
+  Object? _bookingsError;
 
-  /// Dynamic provider list: merged from the local database (AppState.providers)
-  /// and the built-in sample providers used while no data exists.
-  List<_ServiceProvider> get _providers {
-    final dbProviders = widget.state.providers.map((p) => _ServiceProvider.fromDb(p)).toList();
-    return dbProviders.isEmpty ? _defaultProviders : dbProviders;
+  @override
+  void initState() {
+    super.initState();
+    if (SupabaseConfig.isSupabaseConfigured) {
+      _loadRemoteProviders();
+      _loadRemoteBookings();
+    }
   }
 
-  static const List<_ServiceProvider> _defaultProviders = [
-    _ServiceProvider(
-      name: 'قاعة ليالي صنعاء',
-      category: 'قاعات',
-      city: 'صنعاء',
-      rating: 4.8,
-      reviews: 127,
-      price: 2500000,
-      distance: 1.2,
-      icon: Icons.hotel,
-      colors: [Color(0xFF4A1414), Color(0xFF141417)],
-      completedBookings: 340,
-      description: 'قاعة فاخرة لاستضافة المناسبات والأعراس',
-      highlights: ['وجبات', 'موقف', 'تكييف'],
-    ),
-    _ServiceProvider(
-      name: 'عدسة المصور',
-      category: 'تصوير',
-      city: 'صنعاء',
-      rating: 4.9,
-      reviews: 214,
-      price: 1200000,
-      distance: 0.5,
-      icon: Icons.camera_alt,
-      colors: [Color(0xFF141417), Color(0xFF2C1810)],
-      completedBookings: 521,
-      description: 'تصوير احترافي للأعراس والمناسبات',
-      highlights: ['فيديو', 'صور', 'درامة'],
-    ),
-    _ServiceProvider(
-      name: 'الفنان سامي',
-      category: 'مطربين',
-      city: 'صنعاء',
-      rating: 4.7,
-      reviews: 89,
-      price: 3000000,
-      distance: 2.1,
-      icon: Icons.mic,
-      colors: [Color(0xFF212121), Color(0xFF141417)],
-      completedBookings: 156,
-      description: 'مطرب موهوب لأجمل المناسبات',
-      highlights: ['أداء مباشر', 'مكينة'],
-    ),
-  ];
+  List<_ServiceProvider> get _providers {
+    if (SupabaseConfig.isSupabaseConfigured) return _remoteProviders;
+    final dbProviders =
+        widget.state.providers.map(_ServiceProvider.fromDb).toList();
+    return dbProviders.isEmpty ? sampleMarketplaceProviders : dbProviders;
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -143,7 +135,10 @@ class _CustomerExperienceState extends State<CustomerExperience> {
       _home(),
       _customerBookings(),
       const _InboxPage(),
-      const _CustomerProfilePage(),
+      _CustomerProfilePage(
+        onAuthenticate: widget.onRoleChanged,
+        onSignedOut: () => _loadRemoteBookings(),
+      ),
     ];
     return Theme(
       data: _darkTheme,
@@ -175,41 +170,161 @@ class _CustomerExperienceState extends State<CustomerExperience> {
           provider.city.contains(_query);
       return matchesCategory && matchesCity && matchesQuery;
     }).toList()
-      ..sort((a, b) => _sort == 'الأعلى تقييماً'
-          ? b.rating.compareTo(a.rating)
-          : a.distance.compareTo(b.distance));
+      ..sort((a, b) {
+        switch (_sort) {
+          case 'الأعلى تقييماً':
+            return b.rating.compareTo(a.rating);
+          case 'الأقل سعراً':
+            return a.price.compareTo(b.price);
+          case 'الأكثر حجوزات':
+            return b.completedBookings.compareTo(a.completedBookings);
+          default:
+            return a.distance.compareTo(b.distance);
+        }
+      });
 
     return CustomScrollView(
       slivers: [
         SliverToBoxAdapter(child: _customerHeader()),
-        SliverToBoxAdapter(child: _searchBox()),
-        SliverToBoxAdapter(child: _offerBanner()),
-        SliverToBoxAdapter(child: _categories()),
-        SliverToBoxAdapter(child: _sectionHeader('اكتشف الخدمات', 'عرض الكل')),
-        SliverToBoxAdapter(child: _filters()),
-        if (filtered.isEmpty)
+        if (_providersLoading)
           const SliverFillRemaining(
             hasScrollBody: false,
+            child: Center(child: CircularProgressIndicator(color: _accent)),
+          ),
+        if (_providersError != null)
+          SliverFillRemaining(
+            hasScrollBody: false,
             child: Center(
-              child:
-                  Text('لا توجد نتائج مطابقة', style: TextStyle(color: _muted)),
-            ),
-          )
-        else
-          SliverPadding(
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
-            sliver: SliverList(
-              delegate: SliverChildBuilderDelegate(
-                (context, index) => _ProviderCard(
-                  provider: filtered[index],
-                  onTap: () => _openProvider(filtered[index]),
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text('تعذر تحميل مزودي الخدمة: $_providersError',
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(color: _muted)),
+                    const SizedBox(height: 12),
+                    OutlinedButton(
+                      onPressed: _loadRemoteProviders,
+                      child: const Text('إعادة المحاولة'),
+                    ),
+                  ],
                 ),
-                childCount: filtered.length,
               ),
             ),
           ),
+        if (!_providersLoading && _providersError == null) ...[
+          SliverToBoxAdapter(child: _searchBox()),
+          SliverToBoxAdapter(child: _offerBanner()),
+          SliverToBoxAdapter(child: _categories()),
+          SliverToBoxAdapter(
+              child: _sectionHeader('اكتشف الخدمات', 'عرض الكل')),
+          SliverToBoxAdapter(child: _filters()),
+          if (filtered.isEmpty)
+            const SliverFillRemaining(
+              hasScrollBody: false,
+              child: Center(
+                child: Text('لا توجد نتائج مطابقة',
+                    style: TextStyle(color: _muted)),
+              ),
+            )
+          else
+            SliverPadding(
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+              sliver: SliverList(
+                delegate: SliverChildBuilderDelegate(
+                  (context, index) => _ProviderCard(
+                    provider: filtered[index],
+                    onTap: () => _openProvider(filtered[index]),
+                  ),
+                  childCount: filtered.length,
+                ),
+              ),
+            ),
+        ],
       ],
     );
+  }
+
+  Future<void> _loadRemoteProviders() async {
+    setState(() {
+      _providersLoading = true;
+      _providersError = null;
+    });
+    try {
+      final rows = await Supabase.instance.client
+          .from('providers')
+          .select(
+              'id,category,city,business_name,description,starting_price,max_guests,deposit_percent,provider_packages(name,price,included_guests,additional_guest_price),provider_seasonal_rates(start_date,end_date,multiplier)')
+          .eq('verification_status', 'approved')
+          .order('created_at', ascending: false);
+      if (!mounted) return;
+      setState(() {
+        _remoteProviders = (rows as List)
+            .map((row) => _ServiceProvider.fromRemote(
+                Map<String, dynamic>.from(row as Map)))
+            .toList();
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _providersError = error);
+    } finally {
+      if (mounted) setState(() => _providersLoading = false);
+    }
+  }
+
+  Future<void> _loadRemoteBookings() async {
+    if (Supabase.instance.client.auth.currentUser == null) {
+      if (mounted) {
+        setState(() {
+          _remoteBookings = [];
+          _bookingsLoading = false;
+          _bookingsError = null;
+        });
+      }
+      return;
+    }
+    setState(() {
+      _bookingsLoading = true;
+      _bookingsError = null;
+    });
+    try {
+      final rows = await Supabase.instance.client
+          .from('bookings')
+          .select(
+              'id,provider_id,customer_name,customer_phone,service_name,event_date,total_amount,deposit_amount,status,shift_type,package_name,guest_count,providers(business_name)')
+          .order('event_date', ascending: false);
+      if (!mounted) return;
+      setState(() {
+        _remoteBookings = (rows as List).map((row) {
+          final item = Map<String, dynamic>.from(row as Map);
+          final provider = item['providers'] as Map<String, dynamic>?;
+          return MarketplaceBooking(
+            id: item['id'] as String,
+            providerId: item['provider_id'] as String? ?? '',
+            customerName: item['customer_name'] as String? ?? '',
+            customerPhone: item['customer_phone'] as String? ?? '',
+            providerName: provider?['business_name'] as String? ?? 'مقدم خدمة',
+            serviceName: _displayCategory(item['service_name'] as String),
+            date: DateTime.parse(item['event_date'] as String),
+            amount: (item['total_amount'] as num).toDouble(),
+            depositAmount: (item['deposit_amount'] as num).toDouble(),
+            status: item['status'] as String,
+            shiftType: EventShift.values.firstWhere(
+              (shift) => shift.name == item['shift_type'],
+              orElse: () => EventShift.evening,
+            ),
+            packageName: item['package_name'] as String? ?? '',
+            guestCount: item['guest_count'] as int?,
+          );
+        }).toList();
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _bookingsError = error);
+    } finally {
+      if (mounted) setState(() => _bookingsLoading = false);
+    }
   }
 
   Widget _customerHeader() => Padding(
@@ -316,11 +431,11 @@ class _CustomerExperienceState extends State<CustomerExperience> {
   Widget _categories() {
     const categories = [
       _CategoryOption('الكل', Icons.grid_view_rounded),
-      _CategoryOption('قاعات', Icons.apartment_rounded),
-      _CategoryOption('فنانين', Icons.mic_external_on_rounded),
-      _CategoryOption('مصورين', Icons.camera_alt_rounded),
-      _CategoryOption('كوش', Icons.local_florist_rounded),
-      _CategoryOption('خدمات', Icons.auto_awesome_rounded),
+      _CategoryOption('قاعات أفراح', Icons.apartment_rounded),
+      _CategoryOption('فنانين وزفات', Icons.mic_external_on_rounded),
+      _CategoryOption('مصورين واستوديوهات', Icons.camera_alt_rounded),
+      _CategoryOption('تنسيق كوش وضيافة', Icons.local_florist_rounded),
+      _CategoryOption('صوتيات وإضاءة', Icons.auto_awesome_rounded),
     ];
     return SizedBox(
       height: 112,
@@ -399,7 +514,12 @@ class _CustomerExperienceState extends State<CustomerExperience> {
                   const SizedBox(height: 4),
                   _DarkDropdown<String>(
                     value: _sort,
-                    items: const ['الأعلى تقييماً', 'الأقرب'],
+                    items: const [
+                      'الأعلى تقييماً',
+                      'الأقل سعراً',
+                      'الأكثر حجوزات',
+                      'الأقرب حسب الموقع',
+                    ],
                     label: (value) => value,
                     onChanged: (value) => setState(() => _sort = value),
                   ),
@@ -428,7 +548,30 @@ class _CustomerExperienceState extends State<CustomerExperience> {
       );
 
   Widget _customerBookings() {
-    final items = widget.bookings.reversed.toList();
+    if (_bookingsLoading) {
+      return const Center(child: CircularProgressIndicator(color: _accent));
+    }
+    if (_bookingsError != null) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text('تعذر تحميل حجوزاتك: $_bookingsError',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(color: _muted)),
+              TextButton(
+                  onPressed: _loadRemoteBookings,
+                  child: const Text('إعادة المحاولة')),
+            ],
+          ),
+        ),
+      );
+    }
+    final items = SupabaseConfig.isSupabaseConfigured
+        ? _remoteBookings.reversed.toList()
+        : widget.bookings.reversed.toList();
     return _SimplePage(
       title: 'حجوزاتي',
       subtitle: 'تابع طلبات الحجز وحالتها',
@@ -451,84 +594,214 @@ class _CustomerExperienceState extends State<CustomerExperience> {
       MaterialPageRoute<void>(
         builder: (_) => _ProviderProfilePage(
           provider: provider,
-          onBook: (date) => _createBooking(provider, date),
+          bookings: widget.bookings,
+          onBook: (date, bookedShifts) =>
+              _createBooking(provider, date, bookedShifts),
         ),
       ),
     );
   }
 
-  Future<void> _createBooking(_ServiceProvider provider, DateTime date) async {
+  Future<void> _createBooking(
+    _ServiceProvider provider,
+    DateTime date,
+    Set<EventShift> bookedShifts,
+  ) async {
+    if (SupabaseConfig.isSupabaseConfigured &&
+        Supabase.instance.client.auth.currentUser == null) {
+      Navigator.of(context).popUntil((route) => route.isFirst);
+      widget.onRoleChanged(MarketplaceRole.auth);
+      return;
+    }
     final customerName = TextEditingController();
     final phone = TextEditingController();
+    final service = provider.eventService;
+    final guestCountController =
+        TextEditingController(text: service.maxGuests == null ? '' : '150');
+    final availableShifts = EventShift.values.where((shift) {
+      if (bookedShifts.contains(EventShift.fullDay)) return false;
+      if (shift == EventShift.fullDay) return bookedShifts.isEmpty;
+      return !bookedShifts.contains(shift);
+    }).toList();
+    if (availableShifts.isEmpty) {
+      _showMessage(context, 'لا توجد فترة متاحة في هذا اليوم.');
+      customerName.dispose();
+      phone.dispose();
+      guestCountController.dispose();
+      return;
+    }
+    var selectedShift = availableShifts.first;
+    var selectedPackage =
+        service.packages.isEmpty ? '' : service.packages.first.name;
+    var guestCount = service.maxGuests == null ? 0 : 150;
     final formKey = GlobalKey<FormState>();
     final accepted = await showModalBottomSheet<bool>(
       context: context,
       isScrollControlled: true,
       backgroundColor: _surface,
-      builder: (context) => Padding(
-        padding: EdgeInsets.fromLTRB(
-            20, 22, 20, MediaQuery.of(context).viewInsets.bottom + 24),
-        child: Form(
-          key: formKey,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              const Text('تأكيد طلب الحجز',
-                  style: TextStyle(
-                      color: _white,
-                      fontSize: 19,
-                      fontWeight: FontWeight.w700)),
-              const SizedBox(height: 7),
-              Text(
-                '${provider.name} · ${_formatDate(date)} · ${_money(provider.price)} ر.ي',
-                style: const TextStyle(color: _muted),
+      builder: (context) => StatefulBuilder(
+        builder: (context, setModalState) => Padding(
+          padding: EdgeInsets.fromLTRB(
+              20, 22, 20, MediaQuery.of(context).viewInsets.bottom + 24),
+          child: SingleChildScrollView(
+            child: Form(
+              key: formKey,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const Text('تأكيد طلب الحجز',
+                      style: TextStyle(
+                          color: _white,
+                          fontSize: 19,
+                          fontWeight: FontWeight.w700)),
+                  const SizedBox(height: 12),
+                  DropdownButtonFormField<EventShift>(
+                    value: selectedShift,
+                    decoration:
+                        const InputDecoration(labelText: 'فترة المناسبة'),
+                    items: availableShifts
+                        .map((shift) => DropdownMenuItem(
+                              value: shift,
+                              child: Text(_shiftLabel(shift)),
+                            ))
+                        .toList(),
+                    onChanged: (value) => setModalState(
+                        () => selectedShift = value ?? EventShift.evening),
+                  ),
+                  if (service.packages.isNotEmpty) ...[
+                    const SizedBox(height: 11),
+                    DropdownButtonFormField<String>(
+                      value: selectedPackage,
+                      decoration: const InputDecoration(labelText: 'الباقة'),
+                      items: service.packages
+                          .map((item) => DropdownMenuItem(
+                                value: item.name,
+                                child: Text(item.name),
+                              ))
+                          .toList(),
+                      onChanged: (value) => setModalState(
+                          () => selectedPackage = value ?? selectedPackage),
+                    ),
+                  ],
+                  if (service.maxGuests != null) ...[
+                    const SizedBox(height: 11),
+                    _darkField(
+                      controller: guestCountController,
+                      label: 'عدد الضيوف (الحد الأقصى ${service.maxGuests})',
+                      keyboardType: TextInputType.number,
+                      validator: (value) {
+                        final count = int.tryParse(value ?? '');
+                        if (count == null || count < 1) {
+                          return 'أدخل عدداً صحيحاً للضيوف';
+                        }
+                        if (count > service.maxGuests!) {
+                          return 'تجاوز العدد سعة المكان';
+                        }
+                        return null;
+                      },
+                      onChanged: (value) => setModalState(
+                          () => guestCount = int.tryParse(value) ?? 0),
+                    ),
+                  ],
+                  const SizedBox(height: 11),
+                  _darkField(
+                    controller: customerName,
+                    label: 'اسمك',
+                    validator: (value) => value == null || value.trim().isEmpty
+                        ? 'أدخل الاسم'
+                        : null,
+                  ),
+                  const SizedBox(height: 11),
+                  _darkField(
+                    controller: phone,
+                    label: 'رقم الهاتف',
+                    keyboardType: TextInputType.phone,
+                    validator: (value) => value == null || value.trim().isEmpty
+                        ? 'أدخل رقم الهاتف'
+                        : null,
+                  ),
+                  const SizedBox(height: 12),
+                  Builder(builder: (context) {
+                    final canQuote = service.maxGuests == null ||
+                        (guestCount >= 1 && guestCount <= service.maxGuests!);
+                    final quote = canQuote
+                        ? service.quote(
+                            date: date,
+                            shift: selectedShift,
+                            packageName: selectedPackage.isEmpty
+                                ? null
+                                : selectedPackage,
+                            guestCount: guestCount,
+                          )
+                        : null;
+                    return Column(
+                      children: [
+                        Text(
+                          '${provider.name} · ${_formatDate(date)}',
+                          style: const TextStyle(color: _muted),
+                        ),
+                        const SizedBox(height: 5),
+                        if (quote == null)
+                          const Text(
+                            'أدخل عدد ضيوف ضمن سعة القاعة لعرض السعر.',
+                            style: TextStyle(color: _muted),
+                          )
+                        else
+                          Text(
+                            'الإجمالي ${_money(quote.totalAmount.toInt())} ر.ي · العربون ${_money(quote.depositAmount.toInt())} ر.ي',
+                            style: const TextStyle(
+                                color: _white, fontWeight: FontWeight.w600),
+                          ),
+                      ],
+                    );
+                  }),
+                  const SizedBox(height: 16),
+                  SizedBox(
+                    height: 48,
+                    child: ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                          backgroundColor: _accent,
+                          foregroundColor: Colors.white),
+                      onPressed: () {
+                        if (formKey.currentState!.validate()) {
+                          Navigator.pop(context, true);
+                        }
+                      },
+                      child: const Text('إرسال طلب الحجز'),
+                    ),
+                  ),
+                ],
               ),
-              const SizedBox(height: 18),
-              _darkField(
-                controller: customerName,
-                label: 'اسمك',
-                validator: (value) =>
-                    value == null || value.trim().isEmpty ? 'أدخل الاسم' : null,
-              ),
-              const SizedBox(height: 11),
-              _darkField(
-                controller: phone,
-                label: 'رقم الهاتف',
-                keyboardType: TextInputType.phone,
-                validator: (value) => value == null || value.trim().isEmpty
-                    ? 'أدخل رقم الهاتف'
-                    : null,
-              ),
-              const SizedBox(height: 16),
-              SizedBox(
-                height: 48,
-                child: ElevatedButton(
-                  style: ElevatedButton.styleFrom(
-                      backgroundColor: _accent, foregroundColor: Colors.white),
-                  onPressed: () {
-                    if (formKey.currentState!.validate()) {
-                      Navigator.pop(context, true);
-                    }
-                  },
-                  child: const Text('إرسال طلب الحجز'),
-                ),
-              ),
-            ],
+            ),
           ),
         ),
       ),
     );
     try {
       if (accepted == true) {
+        final quote = service.quote(
+          date: date,
+          shift: selectedShift,
+          packageName: selectedPackage.isEmpty ? null : selectedPackage,
+          guestCount: guestCount,
+        );
         await widget.onCreateBooking(MarketplaceBookingDraft(
           customerName: customerName.text.trim(),
           phone: phone.text.trim(),
+          providerId: service.id,
           providerName: provider.name,
           serviceName: provider.category,
           date: date,
-          amount: provider.price.toDouble(),
+          amount: quote.totalAmount,
+          depositAmount: quote.depositAmount,
+          shiftType: selectedShift,
+          packageName: selectedPackage,
+          guestCount: service.maxGuests == null ? null : guestCount,
         ));
+        if (SupabaseConfig.isSupabaseConfigured) {
+          await _loadRemoteBookings();
+        }
         if (mounted) {
           Navigator.of(context).popUntil((route) => route.isFirst);
           setState(() => _tab = 1);
@@ -540,6 +813,7 @@ class _CustomerExperienceState extends State<CustomerExperience> {
     } finally {
       customerName.dispose();
       phone.dispose();
+      guestCountController.dispose();
     }
   }
 }
@@ -564,7 +838,75 @@ class ProviderExperience extends StatefulWidget {
 
 class _ProviderExperienceState extends State<ProviderExperience> {
   int _tab = 0;
-  _ServiceProvider _provider = _providers.first;
+  _ServiceProvider _provider = sampleMarketplaceProviders.first;
+  List<MarketplaceBooking> _remoteBookings = [];
+  bool _remoteLoading = false;
+  Object? _remoteError;
+
+  @override
+  void initState() {
+    super.initState();
+    if (SupabaseConfig.isSupabaseConfigured) _loadRemoteProviderData();
+  }
+
+  Future<void> _loadRemoteProviderData() async {
+    setState(() {
+      _remoteLoading = true;
+      _remoteError = null;
+    });
+    try {
+      final row = await Supabase.instance.client
+          .rpc('get_current_provider_profile') as Map<String, dynamic>?;
+      if (row == null) {
+        throw StateError('تعذر العثور على ملف مقدم الخدمة.');
+      }
+      if (!mounted) return;
+      setState(() => _provider = _ServiceProvider.fromRemote(row));
+      await _loadRemoteBookings();
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _remoteError = error);
+    } finally {
+      if (mounted) setState(() => _remoteLoading = false);
+    }
+  }
+
+  Future<void> _loadRemoteBookings() async {
+    try {
+      final rows = await Supabase.instance.client
+          .from('bookings')
+          .select(
+              'id,provider_id,customer_name,customer_phone,service_name,event_date,total_amount,deposit_amount,status,shift_type,package_name,guest_count')
+          .eq('provider_id', _provider.eventService.id)
+          .order('event_date', ascending: true);
+      if (!mounted) return;
+      setState(() {
+        _remoteBookings = (rows as List).map((row) {
+          final item = Map<String, dynamic>.from(row as Map);
+          return MarketplaceBooking(
+            id: item['id'] as String,
+            providerId: item['provider_id'] as String? ?? '',
+            customerName: item['customer_name'] as String? ?? '',
+            customerPhone: item['customer_phone'] as String? ?? '',
+            providerName: _provider.name,
+            serviceName: _displayCategory(item['service_name'] as String),
+            date: DateTime.parse(item['event_date'] as String),
+            amount: (item['total_amount'] as num).toDouble(),
+            depositAmount: (item['deposit_amount'] as num).toDouble(),
+            status: item['status'] as String,
+            shiftType: EventShift.values.firstWhere(
+              (shift) => shift.name == item['shift_type'],
+              orElse: () => EventShift.evening,
+            ),
+            packageName: item['package_name'] as String? ?? '',
+            guestCount: item['guest_count'] as int?,
+          );
+        }).toList();
+      });
+    } catch (error) {
+      if (mounted) setState(() => _remoteError = error);
+    }
+  }
 
   @override
   Widget build(BuildContext context) => Theme(
@@ -610,19 +952,21 @@ class _ProviderExperienceState extends State<ProviderExperience> {
                             fontSize: 19,
                             fontWeight: FontWeight.w700)),
                   ),
-                  PopupMenuButton<_ServiceProvider>(
-                    tooltip: 'تبديل حساب مقدم الخدمة',
-                    color: _surfaceRaised,
-                    onSelected: (provider) =>
-                        setState(() => _provider = provider),
-                    icon: const Icon(Icons.storefront_outlined, color: _white),
-                    itemBuilder: (context) => _providers
-                        .map((provider) => PopupMenuItem(
-                              value: provider,
-                              child: Text(provider.name),
-                            ))
-                        .toList(),
-                  ),
+                  if (!SupabaseConfig.isSupabaseConfigured)
+                    PopupMenuButton<_ServiceProvider>(
+                      tooltip: 'تبديل حساب مقدم الخدمة',
+                      color: _surfaceRaised,
+                      onSelected: (provider) =>
+                          setState(() => _provider = provider),
+                      icon:
+                          const Icon(Icons.storefront_outlined, color: _white),
+                      itemBuilder: (context) => sampleMarketplaceProviders
+                          .map((provider) => PopupMenuItem(
+                                value: provider,
+                                child: Text(provider.name),
+                              ))
+                          .toList(),
+                    ),
                   _RoleMenu(onChanged: widget.onRoleChanged),
                   IconButton(
                     onPressed: () => _showMessage(context, 'إعدادات الحساب'),
@@ -675,6 +1019,18 @@ class _ProviderExperienceState extends State<ProviderExperience> {
               ),
             ),
           ),
+          if (SupabaseConfig.isSupabaseConfigured &&
+              !_remoteLoading &&
+              _remoteError == null)
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(18, 12, 18, 0),
+                child: _OutlineAction(
+                  label: 'إدارة الأسعار والعروض الموسمية',
+                  onTap: _openPricing,
+                ),
+              ),
+            ),
           const SliverToBoxAdapter(
             child: _StoriesRow(
               labels: ['الأعمال', 'العروض', 'آراء العملاء', 'الموقع'],
@@ -707,6 +1063,7 @@ class _ProviderExperienceState extends State<ProviderExperience> {
                   MaterialPageRoute<void>(
                     builder: (_) => _ProviderCalendarPage(
                       provider: _provider,
+                      bookings: widget.bookings,
                       ownerMode: true,
                     ),
                   ),
@@ -718,15 +1075,42 @@ class _ProviderExperienceState extends State<ProviderExperience> {
       );
 
   Widget _requests() {
-    final pending = widget.bookings
+    final bookings =
+        SupabaseConfig.isSupabaseConfigured ? _remoteBookings : widget.bookings;
+    if (_remoteLoading) {
+      return const Center(child: CircularProgressIndicator(color: _accent));
+    }
+    if (_remoteError != null) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text('تعذر تحميل بيانات مقدم الخدمة: $_remoteError',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(color: _muted)),
+              TextButton(
+                  onPressed: _loadRemoteProviderData,
+                  child: const Text('إعادة المحاولة')),
+            ],
+          ),
+        ),
+      );
+    }
+    final pending = bookings
         .where((booking) =>
-            booking.providerName == _provider.name &&
+            (SupabaseConfig.isSupabaseConfigured
+                ? booking.providerId == _provider.eventService.id
+                : booking.providerName == _provider.name) &&
             booking.status == 'pending')
         .toList()
       ..sort((a, b) => a.date.compareTo(b.date));
-    final current = widget.bookings
+    final current = bookings
         .where((booking) =>
-            booking.providerName == _provider.name &&
+            (SupabaseConfig.isSupabaseConfigured
+                ? booking.providerId == _provider.eventService.id
+                : booking.providerName == _provider.name) &&
             booking.status != 'pending')
         .toList()
       ..sort((a, b) => a.date.compareTo(b.date));
@@ -763,6 +1147,7 @@ class _ProviderExperienceState extends State<ProviderExperience> {
   Future<void> _changeStatus(MarketplaceBooking booking, bool confirmed) async {
     try {
       await widget.onUpdateBooking(booking.id, confirmed);
+      if (SupabaseConfig.isSupabaseConfigured) await _loadRemoteBookings();
       if (mounted) {
         _showMessage(
           context,
@@ -773,16 +1158,350 @@ class _ProviderExperienceState extends State<ProviderExperience> {
       if (mounted) _showMessage(context, 'تعذر تحديث الحجز: $error');
     }
   }
+
+  Future<void> _openPricing() async {
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (_) => _ProviderPricingPage(
+          provider: _provider,
+          onSaved: _loadRemoteProviderData,
+        ),
+      ),
+    );
+  }
+}
+
+class _ProviderPricingPage extends StatefulWidget {
+  const _ProviderPricingPage({
+    required this.provider,
+    required this.onSaved,
+  });
+
+  final _ServiceProvider provider;
+  final Future<void> Function() onSaved;
+
+  @override
+  State<_ProviderPricingPage> createState() => _ProviderPricingPageState();
+}
+
+class _ProviderPricingPageState extends State<_ProviderPricingPage> {
+  late final TextEditingController _basePriceController;
+  late final TextEditingController _depositController;
+  late final TextEditingController _maxGuestsController;
+  late final Map<String, TextEditingController> _packagePriceControllers;
+  late List<SeasonalRate> _seasonalRates;
+  bool _saving = false;
+  String? _error;
+
+  EventService get _service => widget.provider.eventService;
+
+  @override
+  void initState() {
+    super.initState();
+    _basePriceController =
+        TextEditingController(text: _service.basePrice.toStringAsFixed(2));
+    _depositController =
+        TextEditingController(text: _service.depositPercent.toString());
+    _maxGuestsController =
+        TextEditingController(text: _service.maxGuests?.toString() ?? '');
+    _packagePriceControllers = {
+      for (final package in _service.packages)
+        package.name:
+            TextEditingController(text: package.price.toStringAsFixed(2)),
+    };
+    _seasonalRates = List.of(_service.seasonalRates);
+  }
+
+  @override
+  void dispose() {
+    _basePriceController.dispose();
+    _depositController.dispose();
+    _maxGuestsController.dispose();
+    for (final controller in _packagePriceControllers.values) {
+      controller.dispose();
+    }
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => Theme(
+        data: _darkTheme,
+        child: Scaffold(
+          backgroundColor: _background,
+          appBar: AppBar(
+            backgroundColor: _background,
+            foregroundColor: _white,
+            title: const Text('إدارة الأسعار'),
+          ),
+          body: ListView(
+            padding: const EdgeInsets.all(18),
+            children: [
+              _pricingField(
+                _basePriceController,
+                'السعر الأساسي',
+                decimal: true,
+              ),
+              const SizedBox(height: 12),
+              _pricingField(
+                _depositController,
+                'نسبة العربون %',
+                decimal: true,
+              ),
+              const SizedBox(height: 12),
+              _pricingField(
+                _maxGuestsController,
+                'السعة القصوى للضيوف',
+              ),
+              for (final entry in _packagePriceControllers.entries) ...[
+                const SizedBox(height: 12),
+                _pricingField(
+                  entry.value,
+                  'سعر الباقة: ${entry.key}',
+                  decimal: true,
+                ),
+              ],
+              const SizedBox(height: 22),
+              const Text(
+                'الأسعار الموسمية',
+                style: TextStyle(
+                  color: _white,
+                  fontSize: 17,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              const SizedBox(height: 8),
+              if (_seasonalRates.isEmpty)
+                const Text(
+                  'لا توجد أسعار موسمية مضافة.',
+                  style: TextStyle(color: _muted),
+                ),
+              for (final rate in _seasonalRates)
+                Card(
+                  color: _surface,
+                  child: ListTile(
+                    title: Text(
+                      '${_dateLabel(rate.startDate)} - ${_dateLabel(rate.endDate)}',
+                      style: const TextStyle(color: _white),
+                    ),
+                    subtitle: Text(
+                      'معامل السعر: ${rate.multiplier}',
+                      style: const TextStyle(color: _muted),
+                    ),
+                    trailing: IconButton(
+                      tooltip: 'حذف السعر الموسمي',
+                      onPressed: rate.id == null || _saving
+                          ? null
+                          : () => _deleteRate(rate),
+                      icon: const Icon(Icons.delete_outline, color: _accent),
+                    ),
+                  ),
+                ),
+              const SizedBox(height: 8),
+              _OutlineAction(
+                label: 'إضافة فترة موسمية',
+                onTap: () {
+                  if (!_saving) _addSeasonalRate();
+                },
+              ),
+              if (_error != null) ...[
+                const SizedBox(height: 12),
+                Text(_error!, style: const TextStyle(color: _accent)),
+              ],
+              const SizedBox(height: 20),
+              _FilledAction(
+                label: _saving ? 'جارٍ الحفظ...' : 'حفظ الأسعار',
+                onTap: () {
+                  if (!_saving) _savePricing();
+                },
+              ),
+            ],
+          ),
+        ),
+      );
+
+  Widget _pricingField(
+    TextEditingController controller,
+    String label, {
+    bool decimal = false,
+  }) =>
+      TextField(
+        controller: controller,
+        keyboardType: TextInputType.numberWithOptions(decimal: decimal),
+        style: const TextStyle(color: _white),
+        decoration: InputDecoration(
+          labelText: label,
+          labelStyle: const TextStyle(color: _muted),
+          filled: true,
+          fillColor: _surface,
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: BorderSide.none,
+          ),
+        ),
+      );
+
+  Future<void> _savePricing() async {
+    final basePrice = double.tryParse(_basePriceController.text.trim());
+    final deposit = double.tryParse(_depositController.text.trim());
+    final maxGuestsText = _maxGuestsController.text.trim();
+    final maxGuests =
+        maxGuestsText.isEmpty ? null : int.tryParse(maxGuestsText);
+    if (basePrice == null ||
+        !basePrice.isFinite ||
+        basePrice <= 0 ||
+        deposit == null ||
+        !deposit.isFinite ||
+        deposit < 0 ||
+        deposit > 100 ||
+        (maxGuestsText.isNotEmpty && (maxGuests == null || maxGuests < 1))) {
+      setState(() => _error = 'تحقق من السعر والعربون وسعة الضيوف.');
+      return;
+    }
+    final packagePrices = <String, double>{};
+    for (final package in _service.packages) {
+      final price = double.tryParse(
+        _packagePriceControllers[package.name]!.text.trim(),
+      );
+      if (price == null || !price.isFinite || price <= 0) {
+        setState(() => _error = 'تحقق من سعر الباقة ${package.name}.');
+        return;
+      }
+      packagePrices[package.name] = price;
+    }
+
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+    try {
+      await Supabase.instance.client.rpc('update_provider_pricing', params: {
+        'target_provider_id': _service.id,
+        'new_starting_price': basePrice,
+        'new_deposit_percent': deposit,
+        'new_max_guests': maxGuests,
+        'package_prices': packagePrices,
+      });
+      await widget.onSaved();
+      if (mounted) Navigator.of(context).pop();
+    } catch (error) {
+      if (mounted) setState(() => _error = 'تعذر حفظ الأسعار: $error');
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  Future<void> _addSeasonalRate() async {
+    final now = DateTime.now();
+    final firstDate = DateTime(now.year, now.month, now.day);
+    final lastDate =
+        DateTime(firstDate.year + 5, firstDate.month, firstDate.day);
+    final start = await showDatePicker(
+      context: context,
+      initialDate: firstDate,
+      firstDate: firstDate,
+      lastDate: lastDate,
+      helpText: 'بداية الفترة الموسمية',
+    );
+    if (start == null || !mounted) return;
+    final end = await showDatePicker(
+      context: context,
+      initialDate: start,
+      firstDate: start,
+      lastDate: lastDate,
+      helpText: 'نهاية الفترة الموسمية',
+    );
+    if (end == null || !mounted) return;
+    final multiplierController = TextEditingController(text: '1.2');
+    final multiplierValue = await showDialog<double>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('معامل السعر الموسمي'),
+        content: TextField(
+          controller: multiplierController,
+          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+          decoration: const InputDecoration(hintText: 'مثال: 1.2'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('إلغاء'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(
+              context,
+              double.tryParse(multiplierController.text.trim()),
+            ),
+            child: const Text('إضافة'),
+          ),
+        ],
+      ),
+    );
+    multiplierController.dispose();
+    if (multiplierValue == null ||
+        !multiplierValue.isFinite ||
+        multiplierValue <= 0) {
+      if (mounted && multiplierValue != null) {
+        setState(() => _error = 'أدخل معاملاً رقمياً أكبر من صفر.');
+      }
+      return;
+    }
+
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+    try {
+      await Supabase.instance.client.from('provider_seasonal_rates').insert({
+        'provider_id': _service.id,
+        'start_date': _dateValue(start),
+        'end_date': _dateValue(end),
+        'multiplier': multiplierValue,
+      });
+      await widget.onSaved();
+      if (mounted) Navigator.of(context).pop();
+    } catch (error) {
+      if (mounted) setState(() => _error = 'تعذرت إضافة الفترة: $error');
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  Future<void> _deleteRate(SeasonalRate rate) async {
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+    try {
+      await Supabase.instance.client
+          .from('provider_seasonal_rates')
+          .delete()
+          .eq('id', rate.id!);
+      await widget.onSaved();
+      if (mounted) Navigator.of(context).pop();
+    } catch (error) {
+      if (mounted) setState(() => _error = 'تعذر حذف الفترة: $error');
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  String _dateLabel(DateTime date) =>
+      '${date.year}/${date.month.toString().padLeft(2, '0')}/${date.day.toString().padLeft(2, '0')}';
+
+  String _dateValue(DateTime date) =>
+      '${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}';
 }
 
 class _ProviderProfilePage extends StatefulWidget {
   const _ProviderProfilePage({
     required this.provider,
+    required this.bookings,
     required this.onBook,
   });
 
   final _ServiceProvider provider;
-  final ValueChanged<DateTime> onBook;
+  final List<MarketplaceBooking> bookings;
+  final void Function(DateTime, Set<EventShift>) onBook;
 
   @override
   State<_ProviderProfilePage> createState() => _ProviderProfilePageState();
@@ -900,27 +1619,36 @@ class _ProviderProfilePageState extends State<_ProviderProfilePage> {
       );
 
   Future<void> _openCalendar() async {
-    final selectedDate = await Navigator.of(context).push<DateTime>(
-      MaterialPageRoute<DateTime>(
+    final selection = await Navigator.of(context).push<_EventDateSelection>(
+      MaterialPageRoute<_EventDateSelection>(
         builder: (_) => _ProviderCalendarPage(
           provider: widget.provider,
-          providerName: _provider.name,
+          bookings: widget.bookings,
         ),
       ),
     );
-    if (selectedDate != null) widget.onBook(selectedDate);
+    if (selection != null) {
+      widget.onBook(selection.date, selection.bookedShifts);
+    }
   }
+}
+
+class _EventDateSelection {
+  const _EventDateSelection(this.date, this.bookedShifts);
+
+  final DateTime date;
+  final Set<EventShift> bookedShifts;
 }
 
 class _ProviderCalendarPage extends StatefulWidget {
   const _ProviderCalendarPage({
     required this.provider,
-    required this.providerName,
+    required this.bookings,
     this.ownerMode = false,
   });
 
   final _ServiceProvider provider;
-  final String providerName;
+  final List<MarketplaceBooking> bookings;
   final bool ownerMode;
 
   @override
@@ -930,7 +1658,8 @@ class _ProviderCalendarPage extends StatefulWidget {
 class _ProviderCalendarPageState extends State<_ProviderCalendarPage> {
   DateTime _month = DateTime(DateTime.now().year, DateTime.now().month);
   DateTime? _selectedDate;
-  final Set<DateTime> _bookedDays = {};
+  final Map<DateTime, Set<EventShift>> _bookedSlots = {};
+  Object? _availabilityError;
 
   @override
   void initState() {
@@ -938,20 +1667,69 @@ class _ProviderCalendarPageState extends State<_ProviderCalendarPage> {
     _loadBookedDays();
   }
 
-  /// Load actual booked days from the real booking database for this provider.
   Future<void> _loadBookedDays() async {
-    final booked = <DateTime>{};
-    for (final booking in kGlobalBookings) {
-      if (booking.provider == widget.providerName &&
-          booking.status != 'cancelled') {
-        booked.add(DateTime(booking.date.year, booking.date.month, booking.date.day));
+    final booked = <DateTime, Set<EventShift>>{};
+    try {
+      if (SupabaseConfig.isSupabaseConfigured) {
+        final start = DateTime(_month.year, _month.month, 1);
+        final end = DateTime(_month.year, _month.month + 1, 0);
+        final rows = await Supabase.instance.client.rpc(
+          'get_provider_booked_slots',
+          params: {
+            'target_provider_id': widget.provider.eventService.id,
+            'from_day': _dateKey(start),
+            'through_day': _dateKey(end),
+          },
+        );
+        for (final row in rows as List) {
+          final item = Map<String, dynamic>.from(row as Map);
+          final date = DateTime.parse(item['event_day'] as String);
+          final shift = EventShift.values.firstWhere(
+            (value) => value.name == item['shift_type'],
+          );
+          booked
+              .putIfAbsent(DateTime(date.year, date.month, date.day), () => {})
+              .add(shift);
+        }
+      } else {
+        for (final booking in widget.bookings) {
+          if (booking.providerName == widget.provider.name &&
+              booking.status != 'cancelled') {
+            booked
+                .putIfAbsent(
+                  DateTime(
+                      booking.date.year, booking.date.month, booking.date.day),
+                  () => {},
+                )
+                .add(booking.shiftType);
+          }
+        }
       }
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _availabilityError = error);
+      return;
     }
-    setState(() => _bookedDays.addAll(booked));
+    if (!mounted) return;
+    setState(() {
+      _bookedSlots
+        ..clear()
+        ..addAll(booked);
+      _availabilityError = null;
+    });
   }
 
-  bool _isBooked(DateTime date) =>
-      _bookedDays.any((day) => _sameDay(day, date));
+  Set<EventShift> _slotsFor(DateTime date) =>
+      _bookedSlots[_dateOnly(date)] ?? const {};
+
+  bool _isBooked(DateTime date) {
+    final shifts = _slotsFor(date);
+    return shifts.contains(EventShift.fullDay) ||
+        (shifts.contains(EventShift.morning) &&
+            shifts.contains(EventShift.evening));
+  }
+
+  bool _hasAnyBooking(DateTime date) => _slotsFor(date).isNotEmpty;
 
   @override
   Widget build(BuildContext context) {
@@ -981,8 +1759,11 @@ class _ProviderCalendarPageState extends State<_ProviderCalendarPage> {
                   Row(
                     children: [
                       IconButton(
-                        onPressed: () => setState(() =>
-                            _month = DateTime(_month.year, _month.month - 1)),
+                        onPressed: () {
+                          setState(() =>
+                              _month = DateTime(_month.year, _month.month - 1));
+                          _loadBookedDays();
+                        },
                         icon: const Icon(Icons.chevron_right, color: _white),
                       ),
                       Expanded(
@@ -997,8 +1778,11 @@ class _ProviderCalendarPageState extends State<_ProviderCalendarPage> {
                         ),
                       ),
                       IconButton(
-                        onPressed: () => setState(() =>
-                            _month = DateTime(_month.year, _month.month + 1)),
+                        onPressed: () {
+                          setState(() =>
+                              _month = DateTime(_month.year, _month.month + 1));
+                          _loadBookedDays();
+                        },
                         icon: const Icon(Icons.chevron_left, color: _white),
                       ),
                     ],
@@ -1034,6 +1818,7 @@ class _ProviderCalendarPageState extends State<_ProviderCalendarPage> {
                       final date =
                           DateTime(_month.year, _month.month, dayNumber);
                       final booked = _isBooked(date);
+                      final hasBooking = _hasAnyBooking(date);
                       final past = date.isBefore(DateTime(DateTime.now().year,
                           DateTime.now().month, DateTime.now().day));
                       final selected = _selectedDate != null &&
@@ -1053,7 +1838,7 @@ class _ProviderCalendarPageState extends State<_ProviderCalendarPage> {
                               Text(
                                 '$dayNumber',
                                 style: TextStyle(
-                                  color: booked
+                                  color: hasBooking
                                       ? const Color(0xFFFF667D)
                                       : past
                                           ? const Color(0xFF55555B)
@@ -1065,7 +1850,7 @@ class _ProviderCalendarPageState extends State<_ProviderCalendarPage> {
                                       : FontWeight.w400,
                                 ),
                               ),
-                              if (booked)
+                              if (hasBooking)
                                 Transform.rotate(
                                   angle: -0.55,
                                   child: Container(
@@ -1093,6 +1878,13 @@ class _ProviderCalendarPageState extends State<_ProviderCalendarPage> {
                 _CalendarLegend(color: Color(0xFFFF667D), label: 'اختيارك'),
               ],
             ),
+            if (_availabilityError != null) ...[
+              const SizedBox(height: 8),
+              Text(
+                'تعذر تحميل التوفر من الخادم: $_availabilityError',
+                style: const TextStyle(color: Color(0xFFFF667D), fontSize: 12),
+              ),
+            ],
             const SizedBox(height: 18),
             _PriceCard(provider: widget.provider),
             if (!widget.ownerMode) ...[
@@ -1104,7 +1896,13 @@ class _ProviderCalendarPageState extends State<_ProviderCalendarPage> {
                       backgroundColor: _accent, foregroundColor: Colors.white),
                   onPressed: _selectedDate == null
                       ? null
-                      : () => Navigator.pop(context, _selectedDate),
+                      : () => Navigator.pop(
+                            context,
+                            _EventDateSelection(
+                              _selectedDate!,
+                              Set<EventShift>.from(_slotsFor(_selectedDate!)),
+                            ),
+                          ),
                   child: const Text('متابعة الحجز'),
                 ),
               ),
@@ -1130,12 +1928,15 @@ class _ServiceProvider {
     required this.completedBookings,
     required this.description,
     required this.highlights,
+    this.maxGuests,
+    this.depositPercent = 20,
+    this.configuredService,
   });
 
   /// Build a marketplace provider card from a database/provider account row.
   factory _ServiceProvider.fromDb(ProviderAccount p) => _ServiceProvider(
         name: p.name,
-        category: p.category,
+        category: _displayCategory(p.category),
         city: 'صنعاء',
         rating: 4.5,
         reviews: 0,
@@ -1147,6 +1948,65 @@ class _ServiceProvider {
         description: 'مزود خدمة محترم عبر لوحة الإدارة',
         highlights: const ['الخدمة', 'الموقع'],
       );
+
+  factory _ServiceProvider.fromRemote(Map<String, dynamic> row) {
+    final category = _displayCategory(row['category'] as String? ?? '');
+    final maxGuests = (row['max_guests'] as num?)?.toInt();
+    final packages =
+        ((row['provider_packages'] as List?) ?? const []).map((item) {
+      final value = Map<String, dynamic>.from(item as Map);
+      return EventPackage(
+        name: value['name'] as String,
+        price: (value['price'] as num).toDouble(),
+        includedGuests: (value['included_guests'] as num).toInt(),
+        additionalGuestPrice:
+            (value['additional_guest_price'] as num).toDouble(),
+      );
+    }).toList();
+    final seasonalRates =
+        ((row['provider_seasonal_rates'] as List?) ?? const []).map((item) {
+      final value = Map<String, dynamic>.from(item as Map);
+      return SeasonalRate(
+        id: value['id'] as String?,
+        startDate: DateTime.parse(value['start_date'] as String),
+        endDate: DateTime.parse(value['end_date'] as String),
+        multiplier: (value['multiplier'] as num).toDouble(),
+      );
+    }).toList();
+    return _ServiceProvider(
+      name: row['business_name'] as String? ?? 'مقدم خدمة',
+      category: category,
+      city: row['city'] as String? ?? '',
+      rating: 0,
+      reviews: 0,
+      price: (row['starting_price'] as num?)?.round() ?? 0,
+      distance: 0,
+      icon: category == 'قاعات أفراح'
+          ? Icons.apartment_rounded
+          : category == 'مصورين واستوديوهات'
+              ? Icons.camera_alt_rounded
+              : category == 'فنانين وزفات'
+                  ? Icons.mic_rounded
+                  : Icons.storefront_rounded,
+      colors: const [Color(0xFF31566A), Color(0xFF68A4AF)],
+      completedBookings: 0,
+      description: row['description'] as String? ?? '',
+      highlights: const ['الخدمة', 'التوفر', 'الموقع'],
+      maxGuests: maxGuests,
+      depositPercent: (row['deposit_percent'] as num?)?.toDouble() ?? 20,
+      configuredService: EventService(
+        id: row['id'] as String,
+        name: row['business_name'] as String? ?? 'مقدم خدمة',
+        category: category,
+        city: row['city'] as String? ?? '',
+        basePrice: (row['starting_price'] as num?)?.toDouble() ?? 0,
+        maxGuests: maxGuests,
+        depositPercent: (row['deposit_percent'] as num?)?.toDouble() ?? 20,
+        packages: packages,
+        seasonalRates: seasonalRates,
+      ),
+    );
+  }
 
   final String name;
   final String category;
@@ -1160,12 +2020,66 @@ class _ServiceProvider {
   final int completedBookings;
   final String description;
   final List<String> highlights;
+  final int? maxGuests;
+  final double depositPercent;
+  final EventService? configuredService;
+
+  EventService get eventService {
+    if (configuredService != null) return configuredService!;
+    for (final service in sampleEventServices) {
+      if (service.name == name) return service;
+    }
+    final rate = price.toDouble();
+    return EventService(
+      id: name,
+      name: name,
+      category: category,
+      city: city,
+      basePrice: rate,
+      maxGuests: maxGuests,
+      depositPercent: depositPercent,
+      packages: maxGuests != null
+          ? [
+              EventPackage(
+                name: 'الباقة الأساسية',
+                price: rate,
+                includedGuests: maxGuests!,
+                additionalGuestPrice: 500,
+              ),
+            ]
+          : const [],
+    );
+  }
 }
 
-const _providers = <_ServiceProvider>[
+String _displayCategory(String value) {
+  final category = value.trim().toLowerCase();
+  if (category.contains('hall') || category.contains('قاعة')) {
+    return 'قاعات أفراح';
+  }
+  if (category.contains('artist') ||
+      category.contains('music') ||
+      category.contains('فنان') ||
+      category.contains('مطرب')) {
+    return 'فنانين وزفات';
+  }
+  if (category.contains('photo') ||
+      category.contains('تصوير') ||
+      category.contains('مصور')) {
+    return 'مصورين واستوديوهات';
+  }
+  if (category.contains('sound') ||
+      category.contains('صوت') ||
+      category.contains('إضاءة')) {
+    return 'صوتيات وإضاءة';
+  }
+  return 'تنسيق كوش وضيافة';
+}
+
+const sampleMarketplaceProviders = <_ServiceProvider>[
   _ServiceProvider(
     name: 'قاعة ليالي صنعاء',
-    category: 'قاعات',
+    category: 'قاعات أفراح',
     city: 'صنعاء',
     rating: 4.9,
     reviews: 128,
@@ -1180,7 +2094,7 @@ const _providers = <_ServiceProvider>[
   ),
   _ServiceProvider(
     name: 'عدسة المصور',
-    category: 'مصورين',
+    category: 'مصورين واستوديوهات',
     city: 'صنعاء',
     rating: 4.8,
     reviews: 94,
@@ -1195,7 +2109,7 @@ const _providers = <_ServiceProvider>[
   ),
   _ServiceProvider(
     name: 'الفنان سامي',
-    category: 'فنانين',
+    category: 'فنانين وزفات',
     city: 'صنعاء',
     rating: 4.7,
     reviews: 76,
@@ -1209,7 +2123,7 @@ const _providers = <_ServiceProvider>[
   ),
   _ServiceProvider(
     name: 'لمسة ورد للكوش',
-    category: 'كوش',
+    category: 'تنسيق كوش وضيافة',
     city: 'صنعاء',
     rating: 4.6,
     reviews: 58,
@@ -1222,18 +2136,18 @@ const _providers = <_ServiceProvider>[
     highlights: ['تصاميم', 'باقات ورد', 'آراء العملاء', 'العروض'],
   ),
   _ServiceProvider(
-    name: 'استراحة السكون',
-    category: 'خدمات',
+    name: 'أنغام للصوت والإضاءة',
+    category: 'صوتيات وإضاءة',
     city: 'صنعاء',
     rating: 4.8,
     reviews: 43,
-    price: 50000,
-    distance: 7.5,
-    icon: Icons.cabin_rounded,
+    price: 80000,
+    distance: 5.2,
+    icon: Icons.speaker_group_rounded,
     colors: [Color(0xFF315B48), Color(0xFF78A87B)],
     completedBookings: 38,
-    description: 'مساحة هادئة للعائلات مع جلسة خارجية ومطبخ.',
-    highlights: ['المكان', 'المرافق', 'آراء العملاء', 'التوفر'],
+    description: 'تجهيز صوت وإضاءة احترافي للأعراس والمناسبات.',
+    highlights: ['الصوتيات', 'الإضاءة', 'آراء العملاء', 'العروض'],
   ),
 ];
 
@@ -1569,7 +2483,9 @@ class _MediaTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final colors = _providers[index % _providers.length].colors;
+    final colors =
+        sampleMarketplaceProviders[index % sampleMarketplaceProviders.length]
+            .colors;
     return Container(
       decoration: BoxDecoration(
         gradient: LinearGradient(
@@ -1580,8 +2496,12 @@ class _MediaTile extends StatelessWidget {
       child: Stack(
         children: [
           Center(
-            child: Icon(_providers[index % _providers.length].icon,
-                size: 44, color: Colors.white.withOpacity(0.82)),
+            child: Icon(
+                sampleMarketplaceProviders[
+                        index % sampleMarketplaceProviders.length]
+                    .icon,
+                size: 44,
+                color: Colors.white.withOpacity(0.82)),
           ),
           if (index % 3 == 2)
             const Positioned(
@@ -1661,6 +2581,18 @@ class _ProviderRequestTile extends StatelessWidget {
             const SizedBox(height: 6),
             Text('${booking.serviceName} · ${_formatDate(booking.date)}',
                 style: const TextStyle(color: _muted, fontSize: 12)),
+            const SizedBox(height: 4),
+            Text(
+              '${_shiftLabel(booking.shiftType)}'
+              '${booking.packageName.isEmpty ? '' : ' · ${booking.packageName}'}'
+              '${booking.guestCount == null ? '' : ' · ${booking.guestCount} ضيف'}',
+              style: const TextStyle(color: _muted, fontSize: 12),
+            ),
+            if (booking.customerPhone.isNotEmpty) ...[
+              const SizedBox(height: 4),
+              Text('هاتف العميل: ${booking.customerPhone}',
+                  style: const TextStyle(color: _muted, fontSize: 12)),
+            ],
             const SizedBox(height: 5),
             Text('${_money(booking.amount.round())} ر.ي',
                 style: const TextStyle(
@@ -1715,8 +2647,16 @@ class _BookingTile extends StatelessWidget {
                       style: const TextStyle(
                           color: _white, fontWeight: FontWeight.w700)),
                   const SizedBox(height: 4),
-                  Text('${booking.serviceName} · ${_formatDate(booking.date)}',
-                      style: const TextStyle(color: _muted, fontSize: 11)),
+                  Text(
+                    '${booking.serviceName} · ${_formatDate(booking.date)} · '
+                    '${_shiftLabel(booking.shiftType)}',
+                    style: const TextStyle(color: _muted, fontSize: 11),
+                  ),
+                  Text(
+                    'الإجمالي ${_money(booking.amount.round())} · '
+                    'العربون ${_money(booking.depositAmount.round())}',
+                    style: const TextStyle(color: _muted, fontSize: 11),
+                  ),
                 ],
               ),
             ),
@@ -1786,23 +2726,134 @@ class _NotificationPage extends StatelessWidget {
       );
 }
 
-class _CustomerProfilePage extends StatelessWidget {
-  const _CustomerProfilePage();
+class _CustomerProfilePage extends StatefulWidget {
+  const _CustomerProfilePage({
+    required this.onAuthenticate,
+    required this.onSignedOut,
+  });
+
+  final ValueChanged<MarketplaceRole> onAuthenticate;
+  final VoidCallback onSignedOut;
 
   @override
-  Widget build(BuildContext context) => _SimplePage(
-        title: 'حسابي',
-        subtitle: 'إدارة بياناتك وحجوزاتك',
-        child: Column(
-          children: const [
-            _ProfileOption(
-                icon: Icons.person_outline, title: 'البيانات الشخصية'),
-            _ProfileOption(icon: Icons.favorite_border, title: 'المفضلة'),
-            _ProfileOption(icon: Icons.notifications_none, title: 'الإشعارات'),
-            _ProfileOption(icon: Icons.help_outline, title: 'المساعدة والدعم'),
+  State<_CustomerProfilePage> createState() => _CustomerProfilePageState();
+}
+
+class _CustomerProfilePageState extends State<_CustomerProfilePage> {
+  bool _busy = false;
+
+  Future<void> _signOut() async {
+    setState(() => _busy = true);
+    try {
+      await Supabase.instance.client.auth.signOut(scope: SignOutScope.local);
+      widget.onSignedOut();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('تم تسجيل الخروج من هذا الجهاز.')),
+        );
+      }
+    } catch (error) {
+      _showError('تعذر تسجيل الخروج: $error');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _deleteAccount() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('حذف الحساب نهائياً؟'),
+        content: const Text(
+            'سيؤدي ذلك إلى حذف بيانات الحساب والوثائق الخاصة والحجوزات المرتبطة به. لا يمكن التراجع عن هذا الإجراء.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('إلغاء'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('حذف الحساب'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    final user = Supabase.instance.client.auth.currentUser;
+    if (user == null) return;
+    setState(() => _busy = true);
+    try {
+      await Supabase.instance.client.rpc('delete_user_account', params: {
+        'target_user_id': user.id,
+      });
+      await Supabase.instance.client.auth.signOut(scope: SignOutScope.local);
+      widget.onSignedOut();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('تم حذف الحساب والبيانات المرتبطة به.')),
+        );
+      }
+    } catch (error) {
+      _showError('تعذر حذف الحساب: $error');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  void _showError(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final configured = SupabaseConfig.isSupabaseConfigured;
+    final signedIn =
+        configured && Supabase.instance.client.auth.currentUser != null;
+    return _SimplePage(
+      title: 'حسابي',
+      subtitle: 'إدارة بياناتك وحجوزاتك',
+      child: Column(
+        children: [
+          const _ProfileOption(
+              icon: Icons.person_outline, title: 'البيانات الشخصية'),
+          const _ProfileOption(icon: Icons.favorite_border, title: 'المفضلة'),
+          const _ProfileOption(
+              icon: Icons.notifications_none, title: 'الإشعارات'),
+          const _ProfileOption(
+              icon: Icons.help_outline, title: 'المساعدة والدعم'),
+          if (!signedIn && configured)
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                onPressed: () => widget.onAuthenticate(MarketplaceRole.auth),
+                icon: const Icon(Icons.login),
+                label: const Text('تسجيل الدخول أو إنشاء حساب'),
+              ),
+            ),
+          if (signedIn) ...[
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                onPressed: _busy ? null : _signOut,
+                icon: const Icon(Icons.logout),
+                label: const Text('تسجيل الخروج'),
+              ),
+            ),
+            SizedBox(
+              width: double.infinity,
+              child: TextButton.icon(
+                onPressed: _busy ? null : _deleteAccount,
+                icon: const Icon(Icons.delete_outline, color: _accent),
+                label: const Text('حذف الحساب نهائياً'),
+              ),
+            ),
           ],
-        ),
-      );
+        ],
+      ),
+    );
+  }
 }
 
 class _ChatTile extends StatelessWidget {
@@ -2044,6 +3095,9 @@ class _RoleMenu extends StatelessWidget {
               child: Text('واجهة مقدم الخدمة')),
           PopupMenuItem(
               value: MarketplaceRole.admin, child: Text('لوحة الإدارة')),
+          PopupMenuItem(
+              value: MarketplaceRole.auth,
+              child: Text('تسجيل الدخول / إنشاء حساب')),
         ],
       );
 }
@@ -2260,18 +3314,21 @@ class _DarkField extends StatelessWidget {
     required this.label,
     this.keyboardType,
     this.validator,
+    this.onChanged,
   });
 
   final TextEditingController controller;
   final String label;
   final TextInputType? keyboardType;
   final String? Function(String?)? validator;
+  final ValueChanged<String>? onChanged;
 
   @override
   Widget build(BuildContext context) => TextFormField(
         controller: controller,
         keyboardType: keyboardType,
         validator: validator,
+        onChanged: onChanged,
         style: const TextStyle(color: _white),
         decoration: InputDecoration(
           labelText: label,
@@ -2291,12 +3348,14 @@ Widget _darkField({
   required String label,
   TextInputType? keyboardType,
   String? Function(String?)? validator,
+  ValueChanged<String>? onChanged,
 }) =>
     _DarkField(
       controller: controller,
       label: label,
       keyboardType: keyboardType,
       validator: validator,
+      onChanged: onChanged,
     );
 
 ThemeData get _darkTheme => ThemeData(
@@ -2348,6 +3407,23 @@ String _money(int amount) => amount.toString().replaceAllMapped(
 String _formatDate(DateTime date) =>
     '${date.day} ${_arabicMonth(date.month)} ${date.year}';
 
+String _dateKey(DateTime date) => '${date.year.toString().padLeft(4, '0')}-'
+    '${date.month.toString().padLeft(2, '0')}-'
+    '${date.day.toString().padLeft(2, '0')}';
+
+DateTime _dateOnly(DateTime date) => DateTime(date.year, date.month, date.day);
+
+String _shiftLabel(EventShift shift) {
+  switch (shift) {
+    case EventShift.morning:
+      return 'صباحية';
+    case EventShift.evening:
+      return 'مسائية';
+    case EventShift.fullDay:
+      return 'يوم كامل';
+  }
+}
+
 String _arabicMonth(int month) => const [
       'يناير',
       'فبراير',
@@ -2369,6 +3445,8 @@ String _statusLabel(String status) {
       return 'مؤكد';
     case 'cancelled':
       return 'ملغي';
+    case 'completed':
+      return 'مكتمل';
     default:
       return 'بانتظار الرد';
   }

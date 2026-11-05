@@ -1,8 +1,22 @@
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:booking_manager/event_services.dart';
 import 'package:booking_manager/main.dart';
 
 void main() {
+  test('seasonal pricing includes both boundary dates', () {
+    final season = SeasonalRate(
+      startDate: DateTime(2026, 12, 1, 23),
+      endDate: DateTime(2026, 12, 3, 1),
+      multiplier: 1.2,
+    );
+
+    expect(season.appliesTo(DateTime(2026, 12, 1)), isTrue);
+    expect(season.appliesTo(DateTime(2026, 12, 3)), isTrue);
+    expect(season.appliesTo(DateTime(2026, 11, 30)), isFalse);
+    expect(season.appliesTo(DateTime(2026, 12, 4)), isFalse);
+  });
+
   test('booking tracks remaining balance and survives serialization', () {
     final booking = Booking(
       id: 'booking-1',
